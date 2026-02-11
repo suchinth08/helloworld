@@ -2,7 +2,6 @@
 name = "congress-twin"
 version = "0.1.0"
 description = "Congress Utility Bot / Digital Twin — Planner execution + OR/agents"
-readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.109.0",
@@ -12,8 +11,9 @@ dependencies = [
     "sqlalchemy>=2.0.25",
     "python-dotenv>=1.0.0",
     "httpx>=0.25.0",
-    "requests>=2.31.0",  # For MS Graph API calls
-    "networkx>=3.0",  # For graph operations (critical path, dependencies)
+    "requests>=2.31.0",
+    "networkx>=3.0",
+    "python-multipart>=0.0.6",
 ]
 
 [build-system]
@@ -36,11 +36,3 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-v --tb=short"
-
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-select = ["E", "F", "I", "N", "W"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["congress_twin"]

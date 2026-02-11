@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { ListTodo, Loader2, RefreshCw } from "lucide-react";
 import { fetchPlannerTasks, type PlannerTask } from "@/lib/congressTwinApi";
+import TaskDetailPanel from "./TaskDetailPanel";
 
 const DEFAULT_PLAN_ID = "uc31-plan";
 
@@ -34,6 +35,7 @@ export default function TaskListTable({ planId = DEFAULT_PLAN_ID, refreshTrigger
   const [data, setData] = useState<{ tasks: PlannerTask[]; count: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -112,7 +114,11 @@ export default function TaskListTable({ planId = DEFAULT_PLAN_ID, refreshTrigger
           </thead>
           <tbody>
             {data.tasks.map((t) => (
-              <tr key={t.id} className="border-b border-[#f3f4f6] hover:bg-[#f9fafb]">
+              <tr
+                key={t.id}
+                className="border-b border-[#f3f4f6] hover:bg-[#f9fafb] cursor-pointer transition-colors"
+                onClick={() => setSelectedTaskId(t.id)}
+              >
                 <td className="py-2.5 pr-4">
                   <span className="font-medium text-[#111827]">{t.title}</span>
                 </td>
@@ -140,6 +146,11 @@ export default function TaskListTable({ planId = DEFAULT_PLAN_ID, refreshTrigger
           </tbody>
         </table>
       </div>
+      <TaskDetailPanel
+        taskId={selectedTaskId}
+        planId={planId}
+        onClose={() => setSelectedTaskId(null)}
+      />
     </div>
   );
 }

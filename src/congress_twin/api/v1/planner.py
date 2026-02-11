@@ -23,6 +23,7 @@ from congress_twin.services.external_events_service import (
     reject_proposed_action,
 )
 from congress_twin.services.monte_carlo_service import run_monte_carlo
+from congress_twin.db.planner_repo import get_planner_task_with_details
 from congress_twin.services.planner_service import (
     get_attention_dashboard,
     get_changes_since_sync,
@@ -37,6 +38,7 @@ from congress_twin.services.planner_service import (
     seed_congress_plan,
     sync_planner_tasks,
 )
+from congress_twin.services.task_intelligence import get_task_intelligence
 from congress_twin.services.planner_simulated_data import DEFAULT_PLAN_ID
 
 router = APIRouter()
@@ -65,6 +67,34 @@ async def get_tasks(plan_id: str) -> dict:
     if not tasks and plan_id != DEFAULT_PLAN_ID:
         raise HTTPException(status_code=404, detail="Plan not found")
     return {"plan_id": plan_id, "tasks": tasks, "count": len(tasks)}
+
+
+@router.get("/tasks/{plan_id}/{task_id}")
+async def get_task_details(plan_id: str, task_id: str) -> dict:
+    """
+    Get a single task with all details (checklist, references, dependencies).
+    """
+    task = get_planner_task_with_details(plan_id, task_id)
+    if not task:
+        # Fallback to simulated data if not in DB
+        tasks = get_tasks_for_plan(plan_id)
+        task = next((t for t in tasks if t.get("id") == task_id), None)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+    return {"plan_id": plan_id, "task": task}
+
+
+@router.get("/tasks/{plan_id}/{task_id}/intelligence")
+async def get_task_intelligence_endpoint(plan_id: str, task_id: str, include_simulations: bool = Query(default=True)) -> dict:
+    """
+    Get AI-driven intelligence and optimization suggestions for a task.
+    Includes Monte Carlo predictions, Markov Chain analysis, dependency risks, reassignment recommendations.
+    """
+    _validate_plan(plan_id)
+    intelligence = get_task_intelligence(plan_id, task_id, include_simulations=include_simulations)
+    if "error" in intelligence:
+        raise HTTPException(status_code=404, detail=intelligence["error"])
+    return intelligence
 
 
 @router.get("/attention-dashboard/{plan_id}")

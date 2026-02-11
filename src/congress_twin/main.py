@@ -7,11 +7,14 @@ NVS-GenAI: Lifespan for DB/client init; async-first.
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from congress_twin.config import get_settings
 from congress_twin.api.v1.planner import router as planner_router
+from congress_twin.api.v1.csv_import import router as import_router
+from congress_twin.api.v1.simulation import router as simulation_router
 
 
 @asynccontextmanager
@@ -30,25 +33,47 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-settings = get_settings()
-if settings.cors_allow_all:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Ensure error responses include proper JSON and CORS headers (avoids CORS errors in browser)."""
+    origin = request.headers.get("origin", "*")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "type": type(exc).__name__},
+        headers={
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
     )
 
+
+settings = get_settings()
+# Build allowed origins: when allow_all, use *; else ensure localhost is always allowed for dev
+if settings.cors_allow_all:
+    origins: list[str] = ["*"]
+    credentials = False
+else:
+    origins = list(settings.cors_origins_list)
+    # Ensure localhost / 127.0.0.1 are allowed when frontend runs on same machine or different host
+    for o in ("http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3003", "http://127.0.0.1:3003"):
+        if o not in origins:
+            origins.append(o)
+    credentials = True
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
+
 app.include_router(planner_router, prefix="/api/v1/planner", tags=["planner"])
+app.include_router(import_router, prefix="/api/v1/import", tags=["import"])
+app.include_router(simulation_router, prefix="/api/v1/simulation", tags=["simulation"])
 
 
 @app.get("/health")

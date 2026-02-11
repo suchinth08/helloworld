@@ -13,9 +13,13 @@ from congress_twin.db.planner_repo import (
     get_planner_tasks as get_planner_tasks_from_db,
     set_plan_sync_state,
     upsert_planner_tasks as db_upsert_planner_tasks,
+    upsert_planner_task_details,
+    upsert_planner_task_dependencies,
 )
 from congress_twin.services.graph_client import (
     fetch_plan_tasks_from_graph,
+    fetch_task_details_from_graph,
+    fetch_task_dependencies_from_graph,
     get_token,
     is_graph_configured,
 )
@@ -307,10 +311,13 @@ def get_changes_since_sync(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
     Used for "Changes since publish" / "What changed since last sync".
     """
     tasks = get_tasks_for_plan(plan_id)
-    _, previous_sync_at = get_plan_sync_state(plan_id)
-    if not previous_sync_at:
-        # No previous sync: treat as "changed in last 24h" for UX
+    _, previous_sync_at_raw = get_plan_sync_state(plan_id)
+    previous_sync_at: datetime
+    if not previous_sync_at_raw:
         previous_sync_at = datetime.now(timezone.utc) - timedelta(hours=24)
+    else:
+        # SQLite returns TEXT as str; parse to datetime for comparison
+        previous_sync_at = _parse_iso(str(previous_sync_at_raw)) or datetime.now(timezone.utc) - timedelta(hours=24)
     changed = [
         {
             "id": t["id"],
@@ -390,13 +397,15 @@ def get_execution_tasks(plan_id: str = DEFAULT_PLAN_ID) -> list[dict[str, Any]]:
 
 def get_tasks_for_plan(plan_id: str) -> list[dict[str, Any]]:
     """
-    Return tasks for a plan: from Postgres if we have synced data, else simulated for DEFAULT_PLAN_ID only.
+    Return tasks for a plan: from DB if we have synced data, else simulated for DEFAULT_PLAN_ID only.
+    Uses relative dates for seed data so the attention dashboard (Due next 7 days, Critical path due next,
+    Recently changed) shows meaningful counts.
     """
     from_db = get_planner_tasks_from_db(plan_id)
     if from_db:
         return from_db
     if plan_id == DEFAULT_PLAN_ID:
-        return get_congress_seed_tasks(plan_id)
+        return get_congress_seed_tasks(plan_id, use_relative_dates_for_attention=True)
     return []
 
 
@@ -409,9 +418,29 @@ def sync_planner_tasks(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
         token = get_token()
         if token:
             try:
-                tasks = fetch_plan_tasks_from_graph(plan_id, token)
+                # Fetch tasks with details expanded
+                tasks = fetch_plan_tasks_from_graph(plan_id, token, include_details=True)
                 try:
                     db_upsert_planner_tasks(plan_id, tasks)
+                    
+                    # Fetch and store task details (checklist, references)
+                    for task in tasks:
+                        task_id = task.get("id")
+                        if task_id:
+                            # Details are already in task dict from expanded query, but fetch separately to ensure we have checklist/references
+                            details = fetch_task_details_from_graph(task_id, token)
+                            if details:
+                                upsert_planner_task_details(plan_id, task_id, {
+                                    "checklist": details.get("checklist", {}),
+                                    "references": details.get("references", {}),
+                                    "lastModifiedAt": details.get("lastModifiedDateTime"),
+                                })
+                    
+                    # Fetch and store dependencies
+                    dependencies_map = fetch_task_dependencies_from_graph(plan_id, token)
+                    for task_id, deps in dependencies_map.items():
+                        upsert_planner_task_dependencies(plan_id, task_id, deps)
+                        
                 except Exception as db_e:
                     return {
                         "plan_id": plan_id,
