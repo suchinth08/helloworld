@@ -18,6 +18,8 @@
 10. [Graph & Impact Engine (MVP → Enterprise)](#10-graph--impact-engine-mvp--enterprise)
 11. [Chat Interface](#11-chat-interface)
 12. [Implementation Phases](#12-implementation-phases)
+13. [Database & configuration](#13-database--configuration)
+14. [Related documentation](#14-related-documentation)
 
 ---
 
@@ -85,8 +87,9 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
 | **Publish status** | Show last publish time and “Unpublished changes” count (from `plan_sync_state` + dirty flag). |
 
 **API:**  
-- `POST /api/v1/planner/publish/{plan_id}` — full push.  
-- Optional: `POST /api/v1/planner/publish/{plan_id}?scope=bucket&bucket_id=...` for scoped push.  
+- `POST /api/v1/planner/plans/{plan_id}/publish` — full push.  
+- Optional: scoped push (bucket or changed tasks) for later phase.  
+- See [API_REFERENCE.md](./API_REFERENCE.md) for all endpoints.  
 **Backend:** Extend `graph_client` with `create_plan`, `create_bucket`, `create_task`, `update_task`, `delete_task`, `create_dependency` (Graph API), and call from a new `publish_service` that reconciles DB → Graph.
 
 ---
@@ -109,8 +112,8 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
 - Simulation: existing `monte_carlo_simulator` + `historical_analyzer`; add “recommended assignees” from historical completion by assignee/bucket.
 
 **API:**  
-- `POST /api/v1/planner/plans/from-template` — body: `{ source_plan_id, new_plan_id, name, congress_date }`.  
-- `POST /api/v1/planner/plans/{plan_id}/run-template-simulation` — run Monte Carlo + assignment recommendations; return suggestions and critical path.
+- `GET /api/v1/planner/template/sources` — list template plans (e.g. congress-2022, 2023, 2024).  
+- `POST /api/v1/planner/template` — body: `{ target_plan_id, source_plan_id, congress_date, run_simulation }`; creates plan from template, optionally runs simulation.
 
 ---
 
@@ -125,7 +128,7 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
 
 **Implementation:**  
 - Use **graph** (NetworkX for MVP, §10) to compute downstream/impact.  
-- API: `GET /api/v1/planner/tasks/{plan_id}/impact-preview` — body: proposed change (task_id, field, new_value); response: affected task ids, new critical path end, suggested message for user.  
+- API: `POST /api/v1/planner/plans/{plan_id}/tasks/{task_id}/impact` — body: proposed changes (dueDateTime, startDateTime, assignees, percentComplete, slippage_days); returns impact on downstream tasks. See [API_REFERENCE.md](./API_REFERENCE.md).  
 - After user confirms: apply update; optionally call impact again for “what changed” summary.
 
 ---
@@ -155,9 +158,9 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
 - **Schema:** Table `task_locks(plan_id, task_id, user_id, locked_at)` already present in `init_schema_postgres.sql`.
 
 **API:**  
-- `POST /api/v1/planner/tasks/{plan_id}/{task_id}/lock` — acquire (return 409 if locked by someone else).  
-- `DELETE /api/v1/planner/tasks/{plan_id}/{task_id}/lock` — release.  
-- All task update endpoints check lock before applying.
+- `POST /api/v1/planner/plans/{plan_id}/tasks/{task_id}/lock` — acquire (query: `user_id`; return 409 if locked by someone else).  
+- `DELETE /api/v1/planner/plans/{plan_id}/tasks/{task_id}/lock` — release.  
+- `GET /api/v1/planner/plans/{plan_id}/tasks/{task_id}/lock` — get lock status.
 
 ---
 
@@ -243,7 +246,25 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
   - “Who is recommended for the Booth Development tasks?”
 - **Intent-based suggestions:** In the chat input area, provide **pre-loaded completion suggestions** (intent-based) so users can quickly probe:
   - Tasks, impacts, assignees, critical path, overdue, blockers, simulation results, etc.
-- **Backend:** Search/query layer over tasks, dependencies, attention dashboard, simulation results; optional LLM for NL → structured query (or rule-based intents for MVP).
+- **Backend (implemented):** Intent-based routing over tasks, dependencies, attention dashboard, critical path, workload, impact, milestone, Monte Carlo, and summary. **LLM** (Groq or `CHAT_LLM_API_KEY`) extracts intent + entities from the user message; **regex fallback** when no API key or on LLM failure.  
+  - **Intents:** `attention`, `critical_path`, `workload`, `impact`, `task_list`, `dependencies`, `milestone`, `monte_carlo`, `summary`.  
+  - **API:** `POST /api/v1/planner/chat?plan_id=...` — body: `{ "message": "..." }`.  
+  - **Config:** Set `GROQ_API_KEY` and optionally `GROQ_MODEL` in `.env` for Groq; or `CHAT_LLM_API_KEY` / `CHAT_LLM_MODEL` / `CHAT_LLM_BASE_URL` for OpenAI or custom endpoint.  
+  - See [CHAT_SEMANTIC_LAYER_DESIGN.md](./CHAT_SEMANTIC_LAYER_DESIGN.md) for design.
+
+- **Chat examples (by intent):**
+
+  | Intent | Example messages |
+  |--------|-------------------|
+  | **attention** | “What needs attention today?” · “Any blocked tasks?” · “What’s overdue?” · “Show me blockers” |
+  | **critical_path** | “Critical path status” · “What’s the longest chain?” · “Show critical path” |
+  | **workload** | “Assignees with high workload” · “Who is busy?” · “Who has the most tasks?” · “Workload by person” |
+  | **impact** | “Impact of delaying task-003” · “What if we slip task-005 by 5 days?” · “Effect of delaying Budget approval” |
+  | **task_list** | “Assign task” · “Task list” · “Tasks in progress” · “Show completed tasks” · “Tasks in Discovery bucket” |
+  | **dependencies** | “What depends on task-001?” · “Dependencies for Speaker confirmations” · “What blocks Venue contracts?” |
+  | **milestone** | “Milestone at risk” · “Tasks at risk before event date” · “Go-live readiness” · “What’s at risk for the milestone?” |
+  | **monte_carlo** | “Monte Carlo results” · “Probability we finish on time?” · “On-time completion chance” |
+  | **summary** | “Give me a summary” · “Plan overview” · “How are we doing?” · “Status of the plan” |
 
 ---
 
@@ -300,3 +321,22 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
 | **Chat** | Critical path actions; query data; intent-based suggestions; optional Malloy/semantic layer (see [CHAT_SEMANTIC_LAYER_DESIGN.md](./CHAT_SEMANTIC_LAYER_DESIGN.md)) |
 
 This plan keeps the existing data model (tasks, buckets, checklist as subtasks, task_locks) and layers interactive management, publish, template, simulation, impact analysis, and chat on top of it.
+
+---
+
+## 13. Database & configuration
+
+- **Database:** SQLite by default; **PostgreSQL** when `POSTGRES_HOST` is set in `.env`. Schema name: `POSTGRES_SCHEMA` (default `congress_twin`).
+- **Schema setup:** For PostgreSQL, the app can **auto-create** the schema and missing tables/columns on first use (no manual migration required). For a clean install, run `scripts/init_schema_postgres.sql`; for existing DBs missing columns/tables, run `migrations/007_postgres_catchup.sql`. See [migrations/README.md](./migrations/README.md).
+- **Config:** All settings in `src/congress_twin/config/settings.py`, loaded from `.env` (path resolved from project root). Copy `.env.example` to `.env` and set `POSTGRES_*`, `GROQ_API_KEY` / `GROQ_MODEL`, and optional `CHAT_LLM_*`, `GRAPH_*`, etc.
+
+---
+
+## 14. Related documentation
+
+| Document | Description |
+|----------|--------------|
+| [API_REFERENCE.md](./API_REFERENCE.md) | Full list of backend APIs and services with short descriptions. |
+| [CHAT_SEMANTIC_LAYER_DESIGN.md](./CHAT_SEMANTIC_LAYER_DESIGN.md) | Chat intent design, LLM vs regex, and semantic layer. |
+| [migrations/README.md](./migrations/README.md) | PostgreSQL and SQLite migration instructions. |
+| [.env.example](./.env.example) | Example environment variables (Postgres, Groq/LLM, Graph, CORS). |
