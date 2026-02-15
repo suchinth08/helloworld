@@ -5,9 +5,11 @@ Intent + entity extraction via LLM (when configured) or regex fallback.
 Dispatches to planner_service / impact_analyzer / monte_carlo for each intent.
 """
 
+import logging
 from datetime import datetime
 from typing import Any
 
+from congress_twin.db.planner_repo import get_planner_task_dependencies
 from congress_twin.services.chat_intent import extract_intent
 from congress_twin.services.chat_trace_store import save_trace
 from congress_twin.services.planner_service import (
@@ -17,6 +19,8 @@ from congress_twin.services.planner_service import (
     get_milestone_analysis,
     get_tasks_for_plan,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _format_date_short(iso: str | None) -> str:
@@ -186,10 +190,67 @@ def handle_chat_message(plan_id: str, message: str) -> dict[str, Any]:
             text += " " + ", ".join(t.get("title", t.get("id")) for t in tasks[:8])
         return _respond(plan_id, message, intent, entities, "task_list", {"tasks": tasks, "count": len(tasks)}, text)
 
+    # --- analytical (Malloy semantic layer) ---
+    if intent == "analytical":
+        logger.info("chat_service: analytical intent — using Malloy semantic layer (plan_id=%s)", plan_id)
+        tasks = get_tasks_for_plan(plan_id)
+        deps = get_planner_task_dependencies(plan_id, None)
+        msg_lower = (message or "").lower()
+        # Choose named query from message keywords
+        if "assignee" in msg_lower or "by person" in msg_lower or "who has" in msg_lower:
+            named_query = "tasks_by_assignee"
+        elif "incomplete" in msg_lower or "open" in msg_lower and "bucket" in msg_lower or "not completed" in msg_lower:
+            named_query = "incomplete_by_bucket"
+        elif "summary" in msg_lower or "overview" in msg_lower or "total" in msg_lower and "task" in msg_lower:
+            named_query = "plan_summary"
+        elif "top" in msg_lower and "bucket" in msg_lower or "most task" in msg_lower:
+            named_query = "top_buckets_by_count"
+        elif "status" in msg_lower and "bucket" not in msg_lower:
+            named_query = "tasks_by_status"
+        else:
+            named_query = "completion_by_bucket"
+        logger.info("chat_service: Malloy named_query=%s (tasks=%s, deps=%s)", named_query, len(tasks), len(deps))
+        try:
+            from congress_twin.services.malloy_runner import run_malloy_query
+            rows = run_malloy_query(plan_id, tasks, deps, named_query=named_query)
+        except Exception as e:
+            logger.warning("chat_service: Malloy run_malloy_query failed: %s", e)
+            rows = None
+        if rows is not None and len(rows) > 0:
+            logger.info("chat_service: Malloy returned %s row(s), formatting response", len(rows))
+            if named_query == "completion_by_bucket":
+                lines = [f"**{r.get('bucket_name', '')}**: {r.get('task_count', 0)} tasks, {r.get('completion_pct', 0):.0f}% complete" for r in rows]
+            elif named_query == "top_buckets_by_count":
+                lines = [f"**{r.get('bucket_name', '')}**: {r.get('task_count', 0)} tasks" for r in rows]
+            elif named_query == "tasks_by_status":
+                lines = [f"**{r.get('status', '')}**: {r.get('task_count', 0)} tasks" for r in rows]
+            elif named_query == "tasks_by_assignee":
+                lines = [f"**{r.get('assignee_names', '')}**: {r.get('task_count', 0)} tasks" for r in rows]
+            elif named_query == "incomplete_by_bucket":
+                lines = [f"**{r.get('bucket_name', '')}**: {r.get('task_count', 0)} incomplete" for r in rows]
+            elif named_query == "plan_summary" and rows:
+                r = rows[0]
+                lines = [f"**Plan summary:** {r.get('task_count', 0)} tasks, {r.get('completed_count', 0)} completed ({r.get('completion_pct', 0):.0f}% complete)."]
+            else:
+                lines = [f"**{list(r.keys())[0]}**: {list(r.values())[0]}" for r in rows[:15]]
+            text = "\n".join(lines) if lines else "No data."
+            return _respond(plan_id, message, intent, entities, "analytical", {"rows": rows}, text)
+        # Query was attempted but failed or returned no data — do not suggest installing deps
+        logger.info("chat_service: Malloy query failed or returned no data")
+        return _respond(
+            plan_id,
+            message,
+            intent,
+            entities,
+            "analytical",
+            {},
+            "Analytics query didn’t return results. Please try again or rephrase (e.g. \"Completion by bucket\", \"Count by status\").",
+        )
+
     # --- summary (default) ---
     tasks = get_tasks_for_plan(plan_id)
     completed = sum(1 for t in tasks if t.get("status") == "completed")
     total = len(tasks)
     text = f"You have {total} tasks. {completed} completed."
-    text += " Try: 'What needs attention?', 'Critical path', 'Impact of delaying task-X', 'Monte Carlo', or 'Dependencies for task-X'."
+    text += " Try: 'What needs attention?', 'Critical path', 'Impact of delaying task-X'. Analytics: 'Completion by bucket', 'Count by status', 'Tasks by assignee', 'Incomplete by bucket', 'Plan summary', 'Top buckets'."
     return _respond(plan_id, message, intent, entities, "summary", {"total": total, "completed": completed}, text)

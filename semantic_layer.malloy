@@ -1,0 +1,61 @@
+// Congress Twin semantic layer (Phase 2).
+// Used by chat for analytical questions. Data is exported to DuckDB (tasks, dependencies)
+// before running; see malloy_runner.run_malloy_query().
+
+source: planner_tasks is duckdb.table('tasks') extend {
+  primary_key: planner_task_id
+
+  measure: task_count is count()
+  measure: completed_count is count() { where: status = 'completed' }
+  measure: completion_pct is completed_count / task_count * 100
+}
+
+source: planner_dependencies is duckdb.table('dependencies') extend {
+}
+
+// Named query: completion by workstream (bucket)
+query: completion_by_bucket is planner_tasks -> {
+  group_by: bucket_name
+  aggregate:
+    task_count
+    completed_count
+    completion_pct
+  order_by: bucket_name asc
+}
+
+// Named query: tasks by status
+query: tasks_by_status is planner_tasks -> {
+  group_by: status
+  aggregate: task_count
+  order_by: task_count desc
+}
+
+// Named query: tasks by assignee (from assignee_names JSON array; we treat as string for grouping)
+query: tasks_by_assignee is planner_tasks -> {
+  group_by: assignee_names
+  aggregate: task_count
+  order_by: task_count desc
+}
+
+// Named query: incomplete tasks by bucket (not completed)
+query: incomplete_by_bucket is planner_tasks -> {
+  where: status != 'completed'
+  group_by: bucket_name
+  aggregate: task_count
+  order_by: task_count desc
+}
+
+// Named query: overall plan summary (one row)
+query: plan_summary is planner_tasks -> {
+  aggregate:
+    task_count
+    completed_count
+    completion_pct
+}
+
+// Named query: top buckets by task count
+query: top_buckets_by_count is planner_tasks -> {
+  group_by: bucket_name
+  aggregate: task_count
+  order_by: task_count desc
+}

@@ -20,6 +20,7 @@
 12. [Implementation Phases](#12-implementation-phases)
 13. [Database & configuration](#13-database--configuration)
 14. [Related documentation](#14-related-documentation)
+15. [Architecture](#15-architecture)
 
 ---
 
@@ -246,8 +247,9 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
   - “Who is recommended for the Booth Development tasks?”
 - **Intent-based suggestions:** In the chat input area, provide **pre-loaded completion suggestions** (intent-based) so users can quickly probe:
   - Tasks, impacts, assignees, critical path, overdue, blockers, simulation results, etc.
-- **Backend (implemented):** Intent-based routing over tasks, dependencies, attention dashboard, critical path, workload, impact, milestone, Monte Carlo, and summary. **LLM** (Groq or `CHAT_LLM_API_KEY`) extracts intent + entities from the user message; **regex fallback** when no API key or on LLM failure.  
-  - **Intents:** `attention`, `critical_path`, `workload`, `impact`, `task_list`, `dependencies`, `milestone`, `monte_carlo`, `summary`.  
+- **Backend (implemented):** Intent-based routing over tasks, dependencies, attention dashboard, critical path, workload, impact, milestone, Monte Carlo, **analytical (Malloy)**, and summary. **LLM** (Groq or `CHAT_LLM_API_KEY`) extracts intent + entities from the user message; **regex fallback** when no API key or on LLM failure.  
+  - **Intents:** `attention`, `critical_path`, `workload`, `impact`, `task_list`, `dependencies`, `milestone`, `monte_carlo`, `analytical`, `summary`.  
+  - **Analytical (Phase 2 Malloy):** For questions like “completion by bucket” or “count by status”, chat routes to the **Malloy semantic layer**: plan data is exported to DuckDB, then `semantic_layer.malloy` named queries (`completion_by_bucket`, `tasks_by_status`) are run via `malloy_runner`. Optional: install `uv pip install -e ".[malloy]"` and ensure `semantic_layer.malloy` exists at project root.  
   - **API:** `POST /api/v1/planner/chat?plan_id=...` — body: `{ "message": "..." }`.  
   - **Config:** Set `GROQ_API_KEY` and optionally `GROQ_MODEL` in `.env` for Groq; or `CHAT_LLM_API_KEY` / `CHAT_LLM_MODEL` / `CHAT_LLM_BASE_URL` for OpenAI or custom endpoint.  
   - See [CHAT_SEMANTIC_LAYER_DESIGN.md](./CHAT_SEMANTIC_LAYER_DESIGN.md) for design.
@@ -264,7 +266,12 @@ Users must be able to **add, edit, delete, and manage** tasks (and subtasks) **f
   | **dependencies** | “What depends on task-001?” · “Dependencies for Speaker confirmations” · “What blocks Venue contracts?” |
   | **milestone** | “Milestone at risk” · “Tasks at risk before event date” · “Go-live readiness” · “What’s at risk for the milestone?” |
   | **monte_carlo** | “Monte Carlo results” · “Probability we finish on time?” · “On-time completion chance” |
+  | **analytical** | “Completion by bucket” · “Completion by workstream” · “Count by status” · “Percent complete by bucket” |
   | **summary** | “Give me a summary” · “Plan overview” · “How are we doing?” · “Status of the plan” |
+
+**Intent → backend:** attention → `get_attention_dashboard`; critical_path → `get_critical_path`; workload → `get_tasks_for_plan` + assignee aggregate; impact → `analyze_slippage_impact`; task_list → `get_tasks_for_plan` (optional status/bucket); dependencies → `get_dependencies`; milestone → `get_milestone_analysis`; monte_carlo → `run_monte_carlo`; summary → task counts.
+
+**Analytical named queries (DuckDB SQL):** When intent is analytical, backend exports plan data to temp DuckDB and runs one of: **completion_by_bucket** (task count + completion % per bucket), **tasks_by_status** (count per status), **tasks_by_assignee** (count per assignee), **incomplete_by_bucket** (incomplete count per bucket), **plan_summary** (one row: total, completed, %), **top_buckets_by_count** (buckets by task count). Example messages: "Completion by bucket", "Count by status", "Tasks by assignee", "Plan summary", "Top buckets". Data flow: §15 Architecture.
 
 ---
 
@@ -340,3 +347,98 @@ This plan keeps the existing data model (tasks, buckets, checklist as subtasks, 
 | [CHAT_SEMANTIC_LAYER_DESIGN.md](./CHAT_SEMANTIC_LAYER_DESIGN.md) | Chat intent design, LLM vs regex, and semantic layer. |
 | [migrations/README.md](./migrations/README.md) | PostgreSQL and SQLite migration instructions. |
 | [.env.example](./.env.example) | Example environment variables (Postgres, Groq/LLM, Graph, CORS). |
+
+---
+
+## 15. Architecture
+
+### 15.1 Components
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CLIENT (Next.js frontend)                                                   │
+│  · Dashboard, task list, chat UI, Gantt/Kanban, plan selector               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                                        │ HTTP (REST)
+                                        ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  CONGRESS TWIN BACKEND (FastAPI)                                             │
+│  main.py  · CORS, lifespan, /health                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  API LAYER (api/v1/)                                                         │
+│  · planner.py      Plans, tasks, subtasks, attention, critical path,        │
+│                    chat, publish, sync, locks, impact, dependencies        │
+│  · simulation.py   Monte Carlo, simulation runs                             │
+│  · csv_import.py   CSV import for tasks/dependencies                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  SERVICES (services/)                                                        │
+│  · chat_service.py      Intent dispatch, response formatting, trace        │
+│  · chat_intent.py       LLM/regex intent + entity extraction                │
+│  · malloy_runner.py     Analytical queries (DuckDB SQL export + run)        │
+│  · planner_service.py   Tasks, buckets, critical path, attention, deps       │
+│  · impact_analyzer.py   Slippage/edit impact (graph-based)                  │
+│  · monte_carlo_service.py / monte_carlo_simulator.py  Simulation            │
+│  · template_service.py Create plan from template                           │
+│  · publish_service.py   Publish to MS Planner (Graph API)                   │
+│  · graph_client.py      MS Graph API (Planner read/write)                    │
+│  · lock_service.py      Task-level locking                                  │
+│  · task_intelligence.py Intelligence, recommended assignees                 │
+│  · historical_analyzer.py / cost_function.py  Historical + cost            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  DATA LAYER (db/)                                                            │
+│  · planner_repo.py   planner_plans, planner_tasks, planner_task_details,   │
+│                      planner_task_dependencies, task_locks; SQLite/Postgres │
+│  · events_repo.py    Events / external events                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  CONFIG                                                                      │
+│  · config/settings.py  .env (POSTGRES_*, GROQ_*, CHAT_LLM_*, GRAPH_*, CORS) │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    ▼                   ▼                   ▼
+            ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
+            │ SQLite /     │   │ Groq or      │   │ MS Graph API     │
+            │ PostgreSQL   │   │ OpenAI API   │   │ (optional)       │
+            │ (planner DB) │   │ (chat LLM)   │   │ (Planner sync)   │
+            └──────────────┘   └──────────────┘   └──────────────────┘
+```
+
+### 15.2 Data flows
+
+| Flow | Path |
+|------|------|
+| **Chat (intent)** | Client → `POST /api/v1/planner/chat` → `chat_service.handle_chat_message` → `chat_intent.extract_intent` (LLM or regex) → dispatch by intent to `planner_service` / `impact_analyzer` / `monte_carlo_service` / `malloy_runner` → format response → optional `chat_trace_store.save_trace` → return `{ type, data, text }`. |
+| **Chat (analytical)** | Same entry; intent `analytical` → `malloy_runner.run_malloy_query`: export `planner_tasks` + dependencies to temp DuckDB file → run named SQL (e.g. completion_by_bucket, tasks_by_status) → return rows → `chat_service` formats as text + `data.rows`. |
+| **Plans & tasks** | Client → planner API → `planner_service` (e.g. `get_tasks_for_plan`) → `planner_repo` (SQLAlchemy, SQLite or Postgres) → return JSON. |
+| **Critical path / attention** | `planner_service.get_critical_path` / `get_attention_dashboard` → `planner_repo` + dependency graph (NetworkX) → aggregated view. |
+| **Impact** | Client → `POST .../impact` or chat "impact of delaying task-X" → `impact_analyzer` (graph, downstream) → affected tasks + message. |
+| **Publish** | Client → `POST .../publish` → `publish_service` → `graph_client` (MS Graph) → create/update buckets and tasks in MS Planner. |
+| **Sync** | Client or cron → `POST .../sync` → `graph_client` (read from Planner) or seed → `planner_repo` upsert tasks/dependencies. |
+
+### 15.3 Third-party libraries
+
+| Library | Purpose |
+|---------|---------|
+| **FastAPI** | Web framework, routing, request/response, OpenAPI. |
+| **uvicorn** | ASGI server (run FastAPI app). |
+| **Pydantic / pydantic-settings** | Validation, settings from env. |
+| **SQLAlchemy** | ORM and engine for SQLite/Postgres. |
+| **psycopg2-binary** | PostgreSQL driver. |
+| **python-dotenv** | Load `.env` into environment. |
+| **httpx** | Async HTTP client (e.g. Graph API, external calls). |
+| **requests** | Sync HTTP (where used). |
+| **NetworkX** | In-memory graph for dependencies, critical path, impact. |
+| **openai** | Client for OpenAI-compatible APIs (Groq, OpenAI, custom) — used for chat intent extraction. |
+| **duckdb** (optional) | In-process analytics DB; used by `malloy_runner` to run analytical SQL over exported plan data. |
+| **malloy** (optional) | Semantic layer / Malloy runtime; optional for advanced Malloy queries (current analytics use DuckDB SQL only). |
+
+### 15.4 Architecture summary
+
+Congress Twin is a **backend-for-frontend** API that sits between a Next.js (or other) client and:
+
+1. **Persistent store** — SQLite (default) or PostgreSQL for plans, tasks, subtasks, dependencies, locks. The app can auto-create schema and tables on first use (Postgres).
+2. **LLM provider** — Groq or any OpenAI-compatible API for **chat intent extraction** (no LLM for answering; answers come from backend services and DuckDB analytics).
+3. **MS Graph (optional)** — Sync from and publish to Microsoft Planner; when not configured, seed/simulated data is used.
+
+**Chat** is intent-based: the user message is classified into one of 10 intents (attention, critical_path, workload, impact, task_list, dependencies, milestone, monte_carlo, analytical, summary). Each intent is handled by calling existing services (attention dashboard, critical path, impact analyzer, Monte Carlo, etc.). **Analytical** intent runs slice/dice queries (completion by bucket, tasks by status, etc.) by exporting the current plan to a temporary DuckDB file and executing fixed SQL, so no Malloy runtime or external analytics DB is required for those queries. All responses are formatted as text plus optional structured `data` for the UI.

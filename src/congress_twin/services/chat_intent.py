@@ -23,6 +23,7 @@ INTENTS = [
     "dependencies",
     "milestone",
     "monte_carlo",
+    "analytical",
     "summary",
 ]
 
@@ -49,7 +50,7 @@ def _extract_intent_llm(message: str, plan_id: str) -> dict[str, Any] | None:
         )
         prompt = f"""You are a planner assistant. Given the user message and current plan_id, return a single JSON object with:
 - "intent": one of {json.dumps(INTENTS)}
-- "entities": object with optional keys: plan_id (string), task_id (string, e.g. task-001), slippage_days (integer), event_date (ISO date string), status (notStarted|inProgress|completed), bucket_name (string)
+- "entities": object with optional keys: plan_id (string), task_id (string, e.g. task-001), slippage_days (integer), event_date (ISO date string), status (notStarted|inProgress|completed), bucket_name (string). Use "analytical" for slice/dice questions (completion by bucket, count by status, group by workstream).
 
 Current plan_id: {plan_id}
 User message: {message}
@@ -118,6 +119,14 @@ def _extract_intent_regex(message: str, plan_id: str) -> dict[str, Any]:
         elif re.search(r"not started", msg_lower):
             entities["status"] = "notStarted"
         return {"intent": "task_list", "entities": entities}
+    # Analytical: completion by bucket/workstream, count by status, assignee, incomplete, summary, top buckets
+    if re.search(
+        r"completion by|by workstream|by bucket|count by status|group by|how many.*bucket|percent complete by|"
+        r"tasks by assignee|by assignee|by person|incomplete by bucket|open by bucket|not completed by|"
+        r"plan summary|overview|total tasks|top buckets|most tasks",
+        msg_lower,
+    ):
+        return {"intent": "analytical", "entities": entities}
 
     return {"intent": "summary", "entities": entities}
 

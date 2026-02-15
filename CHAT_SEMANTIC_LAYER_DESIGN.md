@@ -2,6 +2,8 @@
 
 **Phase 1 (Hybrid) implemented:** Intent + LLM extraction, full intent catalog, trace store. See `chat_intent.py`, `chat_service.py`, `chat_trace_store.py` and config `CHAT_LLM_API_KEY`, `CHAT_LLM_MODEL`, `CHAT_LLM_BASE_URL`, `CHAT_TRACE_STORE_PATH`.
 
+**Phase 2 (Malloy) implemented:** Analytical intent routes to the Malloy semantic layer. On demand, plan tasks and dependencies are exported to DuckDB; `semantic_layer.malloy` defines sources and named queries (`completion_by_bucket`, `tasks_by_status`). Chat uses `malloy_runner.run_malloy_query()` and formats results as text. **To enable:** install optional deps `uv pip install -e ".[malloy]"` and ensure `semantic_layer.malloy` exists at project root (see `malloy_runner._MODEL_PATH`).
+
 **Goal:** Make the planner chat intelligent by mapping user natural language to the **data fabric** (plans, tasks, dependencies, attention, critical path, impact) through a **schematic/semantic layer**, with optional **Malloy** (or similar) for composable analytics.
 
 ---
@@ -122,6 +124,7 @@ Queries such as “completion by bucket”, “tasks due next week”, “blocke
 | dependencies | get_dependencies | plan_id, task_id | “What depends on task-003?”, “Upstream of task-007” |
 | milestone | get_milestone_analysis | plan_id, event_date | “Tasks at risk for go-live”, “Milestone by March 1” |
 | monte_carlo | run_monte_carlo | plan_id, event_date | “Probability we finish on time”, “Monte Carlo” |
+| analytical | Malloy runner (DuckDB + semantic_layer.malloy) | plan_id | “Completion by bucket”, “Count by status”, “By workstream” |
 | summary | get_tasks_for_plan + counts | plan_id | “How many tasks?”, “Plan summary” |
 
 ### 4.3 Chat flow (intent path)
@@ -178,13 +181,13 @@ Queries such as “completion by bucket”, “tasks due next week”, “blocke
 4. **Optional trace store:** SQLite table (user_query, intent, entities, response_snippet); use for few-shot in prompt or RAG.
 5. **Frontend:** No change to API contract; optional display of “intent” or “sources” for transparency.
 
-### Phase 2 (Optional Malloy)
+### Phase 2 (Optional Malloy) — **Implemented**
 
-1. **Export/sync:** Job or endpoint that writes `planner_tasks` (and optionally dependencies) to DuckDB or to a SQLite file that DuckDB attaches.
-2. **Malloy model:** Write `semantic_layer.malloy` for congress_twin (sources over tasks, buckets, aggregates).
-3. **Malloy runner:** Thin module (like fmcg-mroi’s `malloy_runner.py`) that runs Malloy against that DB.
-4. **Router in chat:** If intent is “analytical” or “unknown” and message looks like a query (e.g. “by bucket”, “count”, “group”), call Malloy architect + runner; else use intent → API.
-5. **Critic loop (optional):** Like fmcg-mroi, add a critic step that validates generated Malloy and retries once if needed.
+1. **Export/sync:** On each analytical chat request, `malloy_runner` exports current plan tasks and dependencies to a temp DuckDB file (no persistent sync job).
+2. **Malloy model:** `semantic_layer.malloy` at project root defines `planner_tasks` (over `duckdb.table('tasks')`), measures (task_count, completed_count, completion_pct), and named queries `completion_by_bucket`, `tasks_by_status`.
+3. **Malloy runner:** `src/congress_twin/services/malloy_runner.py` — run_malloy_query(..., named_query=...); optional deps `.[malloy]`.
+4. **Router in chat:** Intent `analytical` routes to Malloy; chat_service calls run_malloy_query with named_query (e.g. completion_by_bucket, tasks_by_status), formats rows as text.
+5. **Critic loop (optional):** Not implemented; can be added later for LLM-generated Malloy validation.
 
 ---
 
