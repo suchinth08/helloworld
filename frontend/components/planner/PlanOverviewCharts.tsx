@@ -12,7 +12,7 @@ import {
   ArcElement,
 } from "chart.js";
 import { Bar, Doughnut } from "react-chartjs-2";
-import { fetchPlannerTasks } from "@/lib/congressTwinApi";
+import { fetchPlannerTasks, DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 import { Loader2 } from "lucide-react";
 
 ChartJS.register(
@@ -24,8 +24,6 @@ ChartJS.register(
   Legend,
   ArcElement
 );
-
-const DEFAULT_PLAN_ID = "uc31-plan";
 
 const chartOptions = {
   responsive: true,
@@ -45,16 +43,17 @@ const statusColors = {
 };
 
 interface PlanOverviewChartsProps {
+  planId?: string;
   refreshTrigger?: number;
 }
 
-export default function PlanOverviewCharts({ refreshTrigger = 0 }: PlanOverviewChartsProps) {
+export default function PlanOverviewCharts({ planId = DEFAULT_PLAN_ID, refreshTrigger = 0 }: PlanOverviewChartsProps) {
   const [tasks, setTasks] = useState<{ status: string; percentComplete: number }[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    fetchPlannerTasks(DEFAULT_PLAN_ID)
+    fetchPlannerTasks(planId)
       .then((res) => {
         if (!cancelled) setTasks(res.tasks.map((t) => ({ status: t.status, percentComplete: t.percentComplete })));
       })
@@ -65,7 +64,7 @@ export default function PlanOverviewCharts({ refreshTrigger = 0 }: PlanOverviewC
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [refreshTrigger]);
+  }, [planId, refreshTrigger]);
 
   if (loading) {
     return (

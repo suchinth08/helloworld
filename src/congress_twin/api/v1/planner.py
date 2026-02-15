@@ -25,7 +25,13 @@ from congress_twin.services.external_events_service import (
 from congress_twin.services.monte_carlo_service import run_monte_carlo
 from congress_twin.db.planner_repo import get_planner_task_with_details
 from congress_twin.services.planner_service import (
+    add_subtask,
+    create_planner_task as svc_create_task,
+    get_buckets_for_plan,
+    delete_planner_task as svc_delete_task,
+    delete_subtask as svc_delete_subtask,
     get_attention_dashboard,
+    get_buckets_for_plan,
     get_changes_since_sync,
     get_critical_path,
     get_dependencies,
@@ -35,13 +41,58 @@ from congress_twin.services.planner_service import (
     get_probability_gantt,
     get_tasks_for_plan,
     get_veeva_insights,
+    list_plans,
     seed_congress_plan,
     sync_planner_tasks,
+    update_planner_task as svc_update_task,
+    update_subtask as svc_update_subtask,
 )
 from congress_twin.services.task_intelligence import get_task_intelligence
 from congress_twin.services.planner_simulated_data import DEFAULT_PLAN_ID
 
 router = APIRouter()
+
+
+class CreateTaskBody(BaseModel):
+    title: str = Field(..., description="Task title")
+    bucketId: str = Field(..., description="Bucket ID")
+    startDateTime: Optional[str] = None
+    dueDateTime: Optional[str] = None
+    assignees: Optional[list[str]] = None
+    priority: Optional[int] = None
+    description: Optional[str] = None
+
+
+class UpdateTaskBody(BaseModel):
+    title: Optional[str] = None
+    bucketId: Optional[str] = None
+    startDateTime: Optional[str] = None
+    dueDateTime: Optional[str] = None
+    assignees: Optional[list[str]] = None
+    assigneeNames: Optional[list[str]] = None
+    priority: Optional[int] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    percentComplete: Optional[int] = None
+
+
+class CreateSubtaskBody(BaseModel):
+    title: str = Field(..., description="Subtask title")
+    isChecked: bool = False
+    orderHint: Optional[str] = None
+
+
+class UpdateSubtaskBody(BaseModel):
+    title: Optional[str] = None
+    isChecked: Optional[bool] = None
+    orderHint: Optional[str] = None
+
+
+class TemplateCreateBody(BaseModel):
+    source_plan_id: str = Field(..., description="Source template plan ID (e.g. congress-2023)")
+    target_plan_id: str = Field(..., description="Target plan ID to create")
+    congress_date: Optional[str] = Field(None, description="ISO date for congress")
+    run_simulation: bool = Field(True, description="Run Monte Carlo after templating")
 
 
 class ExternalEventIngestBody(BaseModel):
@@ -54,7 +105,9 @@ class ExternalEventIngestBody(BaseModel):
 
 
 def _validate_plan(plan_id: str) -> None:
-    if plan_id != DEFAULT_PLAN_ID:
+    """Raise 404 if plan_id is not in the list of known plans (from DB or seed)."""
+    known = {p["plan_id"] for p in list_plans()}
+    if plan_id not in known:
         raise HTTPException(status_code=404, detail="Plan not found")
 
 
@@ -62,10 +115,13 @@ def _validate_plan(plan_id: str) -> None:
 async def get_tasks(plan_id: str) -> dict:
     """
     Get task list for a plan (from DB if synced, else simulated for default plan).
+    Returns 200 with empty tasks for known plans (e.g. congress-2022, congress-2023, congress-2024) that have no data yet.
     """
     tasks = get_tasks_for_plan(plan_id)
-    if not tasks and plan_id != DEFAULT_PLAN_ID:
-        raise HTTPException(status_code=404, detail="Plan not found")
+    if not tasks:
+        known_plan_ids = {p["plan_id"] for p in list_plans()}
+        if plan_id not in known_plan_ids:
+            raise HTTPException(status_code=404, detail="Plan not found")
     return {"plan_id": plan_id, "tasks": tasks, "count": len(tasks)}
 
 
@@ -173,6 +229,170 @@ async def sync_plan(plan_id: str) -> dict:
     When Graph is not configured, upserts Congress seed data to DB.
     """
     return sync_planner_tasks(plan_id)
+
+
+# --- Plans & Task CRUD (Phase 1.1, 1.2) ---
+
+@router.get("/plans/{plan_id}/buckets")
+async def get_buckets(plan_id: str) -> dict:
+    """Get buckets (workstreams) for a plan."""
+    buckets = get_buckets_for_plan(plan_id)
+    return {"plan_id": plan_id, "buckets": buckets}
+
+
+@router.get("/plans")
+async def get_plans() -> dict:
+    """List all plans (from DB + seed/simulated: uc31-plan, congress-2022/2023/2024)."""
+    plans = list_plans()
+    return {"plans": plans, "count": len(plans)}
+
+
+@router.post("/plans/{plan_id}/tasks")
+async def create_task(plan_id: str, body: CreateTaskBody) -> dict:
+    """Create a new task in the plan."""
+    try:
+        task = svc_create_task(plan_id, body.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"plan_id": plan_id, "task": task}
+
+
+@router.patch("/plans/{plan_id}/tasks/{task_id}")
+async def update_task(plan_id: str, task_id: str, body: UpdateTaskBody) -> dict:
+    """Partially update a task."""
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        task = get_planner_task_with_details(plan_id, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return {"plan_id": plan_id, "task": task}
+    try:
+        task = svc_update_task(plan_id, task_id, updates)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"plan_id": plan_id, "task": task}
+
+
+@router.delete("/plans/{plan_id}/tasks/{task_id}")
+async def delete_task(plan_id: str, task_id: str) -> dict:
+    """Delete a task."""
+    deleted = svc_delete_task(plan_id, task_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"plan_id": plan_id, "deleted": True, "task_id": task_id}
+
+
+@router.post("/plans/{plan_id}/tasks/{task_id}/subtasks")
+async def create_subtask(plan_id: str, task_id: str, body: CreateSubtaskBody) -> dict:
+    """Add a subtask (checklist item) to a task."""
+    item = add_subtask(plan_id, task_id, body.model_dump(exclude_none=True))
+    return {"plan_id": plan_id, "task_id": task_id, "subtask": item}
+
+
+@router.patch("/plans/{plan_id}/tasks/{task_id}/subtasks/{subtask_id}")
+async def update_subtask_endpoint(
+    plan_id: str, task_id: str, subtask_id: str, body: UpdateSubtaskBody
+) -> dict:
+    """Update a subtask."""
+    updates = body.model_dump(exclude_none=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    item = svc_update_subtask(plan_id, task_id, subtask_id, updates)
+    return {"plan_id": plan_id, "task_id": task_id, "subtask": item}
+
+
+@router.post("/template")
+async def create_from_template(body: TemplateCreateBody) -> dict:
+    """Create a new plan from a template (e.g. congress-2023). Runs simulation and returns summary."""
+    from congress_twin.services.template_service import create_plan_from_template
+    return create_plan_from_template(
+        target_plan_id=body.target_plan_id,
+        source_plan_id=body.source_plan_id,
+        congress_date=body.congress_date,
+        run_simulation=body.run_simulation,
+    )
+
+
+@router.post("/plans/{plan_id}/publish")
+async def publish_plan(plan_id: str) -> dict:
+    """Publish plan to MS Planner. MVP: simulated (validates and returns success)."""
+    from congress_twin.services.publish_service import publish_plan_to_planner
+    return publish_plan_to_planner(plan_id)
+
+
+class ChatMessageBody(BaseModel):
+    message: str = Field(..., description="User message")
+
+
+class ImpactAnalysisBody(BaseModel):
+    dueDateTime: Optional[str] = None
+    startDateTime: Optional[str] = None
+    assignees: Optional[list[str]] = None
+    percentComplete: Optional[int] = None
+    slippage_days: Optional[int] = None
+
+
+@router.post("/plans/{plan_id}/tasks/{task_id}/impact")
+async def analyze_impact(plan_id: str, task_id: str, body: ImpactAnalysisBody) -> dict:
+    """Analyze impact of proposed task changes on downstream tasks."""
+    from congress_twin.services.impact_analyzer import analyze_edit_impact
+    changes = body.model_dump(exclude_none=True)
+    return analyze_edit_impact(plan_id, task_id, changes)
+
+
+@router.post("/plans/{plan_id}/tasks/{task_id}/lock")
+async def acquire_task_lock(plan_id: str, task_id: str, user_id: str = Query("default-user")) -> dict:
+    """Acquire lock for editing a task."""
+    from congress_twin.services.lock_service import acquire_lock
+    ok, locked_by = acquire_lock(plan_id, task_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail=f"Task is being edited by {locked_by}")
+    return {"plan_id": plan_id, "task_id": task_id, "locked": True}
+
+
+@router.delete("/plans/{plan_id}/tasks/{task_id}/lock")
+async def release_task_lock(plan_id: str, task_id: str, user_id: str = Query("default-user")) -> dict:
+    """Release task lock."""
+    from congress_twin.services.lock_service import release_lock
+    release_lock(plan_id, task_id, user_id)
+    return {"plan_id": plan_id, "task_id": task_id, "released": True}
+
+
+@router.get("/plans/{plan_id}/tasks/{task_id}/lock")
+async def get_task_lock(plan_id: str, task_id: str) -> dict:
+    """Get lock status for a task."""
+    from congress_twin.services.lock_service import get_lock
+    lock = get_lock(plan_id, task_id)
+    return {"plan_id": plan_id, "task_id": task_id, "locked": lock is not None, "lock": lock}
+
+
+@router.post("/chat")
+async def chat_endpoint(body: ChatMessageBody, plan_id: str = Query(DEFAULT_PLAN_ID)) -> dict:
+    """Chat: intent-based routing. Returns structured response."""
+    from congress_twin.services.chat_service import handle_chat_message
+    msg = body.message if body else ""
+    if not msg:
+        return {"type": "welcome", "text": "Ask: 'What needs attention today?', 'Critical path status', 'Impact of delaying task X'"}
+    return handle_chat_message(plan_id, msg)
+
+
+@router.get("/template/sources")
+async def list_template_sources() -> dict:
+    """List available template plans (congress-2022, 2023, 2024)."""
+    from congress_twin.services.template_service import list_historical_plans
+    plans = list_historical_plans()
+    return {"plans": plans}
+
+
+@router.delete("/plans/{plan_id}/tasks/{task_id}/subtasks/{subtask_id}")
+async def delete_subtask_endpoint(plan_id: str, task_id: str, subtask_id: str) -> dict:
+    """Delete a subtask."""
+    deleted = svc_delete_subtask(plan_id, task_id, subtask_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Subtask not found")
+    return {"plan_id": plan_id, "task_id": task_id, "deleted": True, "subtask_id": subtask_id}
 
 
 @router.post("/seed")

@@ -5,11 +5,11 @@ import { Calendar, AlertTriangle, CheckCircle, Loader2, RefreshCw } from "lucide
 import {
   fetchMilestoneAnalysis,
   type MilestoneAnalysisResponse,
+  DEFAULT_PLAN_ID,
 } from "@/lib/congressTwinApi";
 
-const DEFAULT_PLAN_ID = "uc31-plan";
-
 interface MilestoneLaneProps {
+  planId?: string;
   refreshTrigger?: number;
 }
 
@@ -26,7 +26,7 @@ function formatDate(iso: string | undefined) {
   }
 }
 
-export default function MilestoneLane({ refreshTrigger = 0 }: MilestoneLaneProps) {
+export default function MilestoneLane({ planId = DEFAULT_PLAN_ID, refreshTrigger = 0 }: MilestoneLaneProps) {
   const [data, setData] = useState<MilestoneAnalysisResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +36,7 @@ export default function MilestoneLane({ refreshTrigger = 0 }: MilestoneLaneProps
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchMilestoneAnalysis(DEFAULT_PLAN_ID, eventDate);
+      const res = await fetchMilestoneAnalysis(planId, eventDate);
       setData(res);
       if (!eventDateInput && res.event_date) {
         const d = new Date(res.event_date);
@@ -51,7 +51,7 @@ export default function MilestoneLane({ refreshTrigger = 0 }: MilestoneLaneProps
 
   useEffect(() => {
     load();
-  }, [refreshTrigger]);
+  }, [planId, refreshTrigger]);
 
   const handleEventDateSubmit = (e: React.FormEvent) => {
     e.preventDefault();

@@ -5,10 +5,11 @@ import { RefreshCw, Loader2, Check, AlertCircle } from "lucide-react";
 import { syncPlannerPlan, DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 
 interface SyncButtonProps {
+  planId?: string;
   onSyncSuccess?: () => void;
 }
 
-export default function SyncButton({ onSyncSuccess }: SyncButtonProps) {
+export default function SyncButton({ planId = DEFAULT_PLAN_ID, onSyncSuccess }: SyncButtonProps) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{
     status: "ok" | "error";
@@ -21,7 +22,7 @@ export default function SyncButton({ onSyncSuccess }: SyncButtonProps) {
     setLoading(true);
     setResult(null);
     try {
-      const data = await syncPlannerPlan(DEFAULT_PLAN_ID);
+      const data = await syncPlannerPlan(planId);
       setResult({
         status: data.status,
         source: data.source,

@@ -2,11 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { GitBranch, Loader2, RefreshCw } from "lucide-react";
-import { fetchCriticalPath, type CriticalPathResponse } from "@/lib/congressTwinApi";
-
-const DEFAULT_PLAN_ID = "uc31-plan";
+import { fetchCriticalPath, type CriticalPathResponse, DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 
 interface CriticalPathSectionProps {
+  planId?: string;
   refreshTrigger?: number;
 }
 
@@ -23,7 +22,7 @@ function formatDate(iso: string | undefined) {
   }
 }
 
-export default function CriticalPathSection({ refreshTrigger = 0 }: CriticalPathSectionProps) {
+export default function CriticalPathSection({ planId = DEFAULT_PLAN_ID, refreshTrigger = 0 }: CriticalPathSectionProps) {
   const [data, setData] = useState<CriticalPathResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +31,7 @@ export default function CriticalPathSection({ refreshTrigger = 0 }: CriticalPath
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchCriticalPath(DEFAULT_PLAN_ID);
+      const res = await fetchCriticalPath(planId);
       setData(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load critical path");
@@ -43,7 +42,7 @@ export default function CriticalPathSection({ refreshTrigger = 0 }: CriticalPath
 
   useEffect(() => {
     load();
-  }, [refreshTrigger]);
+  }, [planId, refreshTrigger]);
 
   if (loading) {
     return (

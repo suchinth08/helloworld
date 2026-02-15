@@ -9,7 +9,7 @@ import {
   type TaskDependenciesResponse,
 } from "@/lib/congressTwinApi";
 
-const DEFAULT_PLAN_ID = "uc31-plan";
+import { DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 
 const STATUS_LABEL: Record<string, string> = {
   notStarted: "Not started",
@@ -25,6 +25,7 @@ const RISK_LABEL: Record<string, string> = {
 };
 
 interface DependencyLensProps {
+  planId?: string;
   refreshTrigger?: number;
 }
 
@@ -41,7 +42,7 @@ function formatDate(iso: string | undefined) {
   }
 }
 
-export default function DependencyLens({ refreshTrigger = 0 }: DependencyLensProps) {
+export default function DependencyLens({ planId = DEFAULT_PLAN_ID, refreshTrigger = 0 }: DependencyLensProps) {
   const [tasks, setTasks] = useState<ExecutionTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedTask, setSelectedTask] = useState<ExecutionTask | null>(null);
@@ -61,7 +62,7 @@ export default function DependencyLens({ refreshTrigger = 0 }: DependencyLensPro
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [refreshTrigger]);
+  }, [planId, refreshTrigger]);
 
   useEffect(() => {
     if (!selectedTask) {
@@ -74,7 +75,7 @@ export default function DependencyLens({ refreshTrigger = 0 }: DependencyLensPro
       .then(setDeps)
       .catch(() => setDeps(null))
       .finally(() => setDepsLoading(false));
-  }, [selectedTask?.id]);
+  }, [planId, selectedTask?.id]);
 
   if (loading) {
     return (

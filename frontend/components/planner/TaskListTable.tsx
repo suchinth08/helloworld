@@ -36,6 +36,7 @@ export default function TaskListTable({ planId = DEFAULT_PLAN_ID, refreshTrigger
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -150,7 +151,17 @@ export default function TaskListTable({ planId = DEFAULT_PLAN_ID, refreshTrigger
         taskId={selectedTaskId}
         planId={planId}
         onClose={() => setSelectedTaskId(null)}
+        onSaved={() => load()}
       />
+      {createModalOpen && (
+        <TaskCreateModal
+          onClose={() => setCreateModalOpen(false)}
+          onCreated={() => {
+            load();
+            setCreateModalOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

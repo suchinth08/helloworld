@@ -9,8 +9,8 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from congress_twin.services.planner_simulated_data import DEFAULT_PLAN_ID, get_simulated_dependencies
-from congress_twin.services.planner_service import get_tasks_for_plan
+from congress_twin.services.planner_simulated_data import DEFAULT_PLAN_ID
+from congress_twin.services.planner_service import get_dependencies_for_plan, get_tasks_for_plan
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -36,7 +36,7 @@ def run_monte_carlo(
     if seed is not None:
         random.seed(seed)
     tasks = get_tasks_for_plan(plan_id)
-    deps = get_simulated_dependencies(plan_id)
+    deps = get_dependencies_for_plan(plan_id)
     task_by_id = {t["id"]: t for t in tasks}
 
     # Build upstream map and topological order for critical path

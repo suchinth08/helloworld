@@ -4,10 +4,20 @@ Congress Twin FastAPI application.
 NVS-GenAI: Lifespan for DB/client init; async-first.
 """
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI, Request
+
+# Ensure congress_twin loggers (e.g. chat_intent) show INFO in uvicorn output
+_ct_log = logging.getLogger("congress_twin")
+_ct_log.setLevel(logging.INFO)
+if not _ct_log.handlers:
+    _h = logging.StreamHandler()
+    _h.setLevel(logging.INFO)
+    _h.setFormatter(logging.Formatter("%(levelname)s:     %(name)s — %(message)s"))
+    _ct_log.addHandler(_h)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 

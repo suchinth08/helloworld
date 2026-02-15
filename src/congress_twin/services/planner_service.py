@@ -9,12 +9,19 @@ from typing import Any
 
 from congress_twin.config import get_settings
 from congress_twin.db.planner_repo import (
+    create_planner_task as repo_create_task,
+    delete_checklist_item as repo_delete_checklist_item,
+    delete_planner_task as repo_delete_task,
     get_plan_sync_state,
+    get_planner_task_dependencies,
+    list_planner_plans as repo_list_plans,
     get_planner_tasks as get_planner_tasks_from_db,
     set_plan_sync_state,
+    upsert_checklist_item as repo_upsert_checklist_item,
     upsert_planner_tasks as db_upsert_planner_tasks,
     upsert_planner_task_details,
     upsert_planner_task_dependencies,
+    update_planner_task as repo_update_task,
 )
 from congress_twin.services.graph_client import (
     fetch_plan_tasks_from_graph,
@@ -26,8 +33,35 @@ from congress_twin.services.graph_client import (
 from congress_twin.services.congress_seed_data import get_congress_seed_tasks
 from congress_twin.services.planner_simulated_data import (
     DEFAULT_PLAN_ID,
+    get_simulated_buckets,
     get_simulated_dependencies,
 )
+
+
+def get_dependencies_for_plan(plan_id: str) -> list[tuple[str, str]]:
+    """
+    Return (task_id, depends_on_task_id) list for a plan.
+    From DB when dependencies exist; otherwise simulated.
+    """
+    rows = get_planner_task_dependencies(plan_id, None)
+    if rows:
+        return [(r.get("taskId") or r.get("task_id", ""), r.get("dependsOnTaskId") or r.get("depends_on_task_id", "")) for r in rows]
+    return get_simulated_dependencies(plan_id)
+
+
+def _seed_congress_dependencies(plan_id: str) -> None:
+    """Upsert congress seed dependencies into DB for the default plan."""
+    deps = get_simulated_dependencies(plan_id)
+    # Group by task_id: task_id -> [depends_on_task_id, ...]
+    by_task: dict[str, list[str]] = {}
+    for task_id, depends_on_id in deps:
+        by_task.setdefault(task_id, []).append(depends_on_id)
+    for task_id, depends_on_ids in by_task.items():
+        upsert_planner_task_dependencies(
+            plan_id,
+            task_id,
+            [{"dependsOnTaskId": dep_id, "dependencyType": "FS"} for dep_id in depends_on_ids],
+        )
 
 
 def _parse_iso(s: str | None) -> datetime | None:
@@ -45,16 +79,17 @@ def get_attention_dashboard(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
     Blocked = not completed and at least one upstream dependency not completed.
     """
     tasks = get_tasks_for_plan(plan_id)
-    deps = get_simulated_dependencies(plan_id)
+    deps = get_dependencies_for_plan(plan_id)
     task_by_id = {t["id"]: t for t in tasks}
     now = datetime.now(timezone.utc)
     one_day_ago = now - timedelta(days=1)
     seven_days_later = now + timedelta(days=7)
 
-    # Upstream: task_id -> list of task_ids it depends on
+    # Upstream: task_id -> list of task_ids it depends on (only for tasks in plan)
     upstream: dict[str, set[str]] = {t["id"]: set() for t in tasks}
-    for task_id, depends_on in deps:
-        upstream[task_id].add(depends_on)
+    for t_id, depends_on in deps:
+        if t_id in upstream:
+            upstream[t_id].add(depends_on)
 
     path_res = get_critical_path(plan_id)
     critical_ids = set(path_res["task_ids"])
@@ -73,13 +108,14 @@ def get_attention_dashboard(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
         last_mod_s = t.get("lastModifiedAt")
         last_mod_dt = _parse_iso(last_mod_s)
 
-        # Blocked: not done and any upstream not done
+        # Blocked: not done and any upstream (in plan) not done
         if status != "completed" and upstream.get(tid):
+            upstream_in_plan = [up_id for up_id in upstream[tid] if up_id in task_by_id]
             any_upstream_incomplete = any(
-                task_by_id.get(up_id, {}).get("status") != "completed"
-                for up_id in upstream[tid]
+                task_by_id[up_id].get("status") != "completed"
+                for up_id in upstream_in_plan
             )
-            if any_upstream_incomplete:
+            if upstream_in_plan and any_upstream_incomplete:
                 blockers.append(t)
 
         # Overdue: due in the past and not completed
@@ -123,16 +159,16 @@ def get_attention_dashboard(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
 def get_dependencies(task_id: str, plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
     """Upstream = must finish before this; downstream = impacted if this slips."""
     tasks = get_tasks_for_plan(plan_id)
-    deps = get_simulated_dependencies(plan_id)
+    deps = get_dependencies_for_plan(plan_id)
     task_by_id = {t["id"]: t for t in tasks}
 
     upstream_ids: set[str] = set()
     downstream_ids: set[str] = set()
 
     for t_id, depends_on in deps:
-        if t_id == task_id:
+        if t_id == task_id and depends_on in task_by_id:
             upstream_ids.add(depends_on)
-        if depends_on == task_id:
+        if depends_on == task_id and t_id in task_by_id:
             downstream_ids.add(t_id)
 
     def _summarize(ids: set[str]) -> list[dict]:
@@ -145,6 +181,7 @@ def get_dependencies(task_id: str, plan_id: str = DEFAULT_PLAN_ID) -> dict[str, 
                 "assigneeNames": task_by_id[tid].get("assigneeNames", []),
             }
             for tid in sorted(ids)
+            if tid in task_by_id
         ]
 
     # Impact statement: "If Task X slips 3 days, these N tasks may move."
@@ -165,19 +202,25 @@ def get_dependencies(task_id: str, plan_id: str = DEFAULT_PLAN_ID) -> dict[str, 
 
 def get_critical_path(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
     """Longest dependency chain (DAG longest path) as critical path."""
-    deps = get_simulated_dependencies(plan_id)
+    deps = get_dependencies_for_plan(plan_id)
     tasks = get_tasks_for_plan(plan_id)
     task_by_id = {t["id"]: t for t in tasks}
     all_ids = {t["id"] for t in tasks}
 
+    if not all_ids:
+        return {"plan_id": plan_id, "critical_path": [], "task_ids": []}
+
+    # Only consider dependencies where both ends are in the plan's task list
+    deps_in_plan = [(t_id, depends_on) for t_id, depends_on in deps if t_id in all_ids and depends_on in all_ids]
+
     # dependents[depends_on] = set of task_ids that depend on it
     dependents: dict[str, set[str]] = {tid: set() for tid in all_ids}
-    for t_id, depends_on in deps:
+    for t_id, depends_on in deps_in_plan:
         dependents[depends_on].add(t_id)
 
     # Topological order (Kahn): in_degree = number of deps that must complete before this task
     in_degree: dict[str, int] = {tid: 0 for tid in all_ids}
-    for t_id, _ in deps:
+    for t_id, _ in deps_in_plan:
         in_degree[t_id] = in_degree.get(t_id, 0) + 1
     order: list[str] = []
     stack = [tid for tid in all_ids if in_degree[tid] == 0]
@@ -193,7 +236,7 @@ def get_critical_path(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
 
     # Predecessors: task_id -> list of task_ids it depends on
     predecessors: dict[str, list[str]] = {tid: [] for tid in all_ids}
-    for t_id, depends_on in deps:
+    for t_id, depends_on in deps_in_plan:
         predecessors[t_id].append(depends_on)
 
     # Longest path length ending at each node (DAG)
@@ -339,7 +382,7 @@ def get_execution_tasks(plan_id: str = DEFAULT_PLAN_ID) -> list[dict[str, Any]]:
     and upstream_count, downstream_count per task.
     """
     tasks = get_tasks_for_plan(plan_id)
-    deps = get_simulated_dependencies(plan_id)
+    deps = get_dependencies_for_plan(plan_id)
     path_res = get_milestone_analysis(plan_id, event_date=None)
     path_res_cp = get_critical_path(plan_id)
     task_by_id = {t["id"]: t for t in tasks}
@@ -350,21 +393,23 @@ def get_execution_tasks(plan_id: str = DEFAULT_PLAN_ID) -> list[dict[str, Any]]:
     upstream: dict[str, set[str]] = {t["id"]: set() for t in tasks}
     downstream: dict[str, set[str]] = {t["id"]: set() for t in tasks}
     for t_id, depends_on in deps:
-        upstream[t_id].add(depends_on)
-        downstream[depends_on].add(t_id)
+        if t_id in upstream and depends_on in downstream:
+            upstream[t_id].add(depends_on)
+            downstream[depends_on].add(t_id)
 
     blocker_ids: set[str] = set()
     for t in tasks:
         tid = t["id"]
         status = t.get("status", "notStarted")
         if status != "completed" and upstream.get(tid):
-            if any(task_by_id.get(up_id, {}).get("status") != "completed" for up_id in upstream[tid]):
+            upstream_in_plan = [up_id for up_id in upstream[tid] if up_id in task_by_id]
+            if any(task_by_id[up_id].get("status") != "completed" for up_id in upstream_in_plan):
                 blocker_ids.add(tid)
 
     blocking_ids: set[str] = set()  # not done and upstream of any critical path task
     for tid in critical_ids:
         for up_id in upstream.get(tid, set()):
-            if task_by_id.get(up_id, {}).get("status") != "completed":
+            if up_id in task_by_id and task_by_id[up_id].get("status") != "completed":
                 blocking_ids.add(up_id)
 
     result: list[dict[str, Any]] = []
@@ -395,16 +440,102 @@ def get_execution_tasks(plan_id: str = DEFAULT_PLAN_ID) -> list[dict[str, Any]]:
     return result
 
 
+def list_plans() -> list[dict[str, Any]]:
+    """
+    List plans: from DB plus seed/simulated (uc31-plan, congress-2022, congress-2023, congress-2024).
+    """
+    from_db = repo_list_plans()
+    known_ids = {p["plan_id"] for p in from_db}
+    seed_plans = [
+        {"plan_id": DEFAULT_PLAN_ID, "name": "UC31 Congress Plan", "congress_date": None, "source_plan_id": None, "created_at": None},
+        {"plan_id": "congress-2022", "name": "Congress 2022", "congress_date": "2022-03-15", "source_plan_id": None, "created_at": None},
+        {"plan_id": "congress-2023", "name": "Congress 2023", "congress_date": "2023-03-20", "source_plan_id": None, "created_at": None},
+        {"plan_id": "congress-2024", "name": "Congress 2024", "congress_date": "2024-03-18", "source_plan_id": None, "created_at": None},
+    ]
+    for p in seed_plans:
+        if p["plan_id"] not in known_ids:
+            from_db.append(p)
+            known_ids.add(p["plan_id"])
+    return from_db
+
+
+def get_buckets_for_plan(plan_id: str) -> list[dict[str, Any]]:
+    """Return buckets (workstreams) for a plan."""
+    return get_simulated_buckets(plan_id)
+
+
+def create_planner_task(plan_id: str, task: dict[str, Any]) -> dict[str, Any]:
+    """
+    Create a new task. Validates bucketId, ensures plan has DB data (seeds if needed).
+    Returns created task with details.
+    """
+    buckets = get_buckets_for_plan(plan_id)
+    bucket_ids = {b["id"] for b in buckets}
+    bucket_by_id = {b["id"]: b["name"] for b in buckets}
+    bucket_id = task.get("bucketId")
+    if not bucket_id:
+        raise ValueError("bucketId is required")
+    if bucket_id not in bucket_ids:
+        raise ValueError(f"Unknown bucketId: {bucket_id}")
+    task = dict(task)
+    task["bucketName"] = task.get("bucketName") or bucket_by_id.get(bucket_id, "")
+    return repo_create_task(plan_id, task)
+
+
+def update_planner_task(plan_id: str, task_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Partially update a task. Validates bucketId if provided.
+    Returns updated task or None if not found.
+    """
+    if "bucketId" in updates:
+        buckets = get_buckets_for_plan(plan_id)
+        bucket_ids = {b["id"] for b in buckets}
+        bucket_by_id = {b["id"]: b["name"] for b in buckets}
+        if updates["bucketId"] not in bucket_ids:
+            raise ValueError(f"Unknown bucketId: {updates['bucketId']}")
+        updates["bucketName"] = bucket_by_id.get(updates["bucketId"], "")
+    return repo_update_task(plan_id, task_id, updates)
+
+
+def delete_planner_task(plan_id: str, task_id: str) -> bool:
+    """Delete a task. Returns True if deleted."""
+    return repo_delete_task(plan_id, task_id)
+
+
+def add_subtask(plan_id: str, task_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Add or update a checklist item (subtask). Returns the created/updated item."""
+    return repo_upsert_checklist_item(plan_id, task_id, item)
+
+
+def update_subtask(plan_id: str, task_id: str, subtask_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Update a checklist item. Returns the updated item."""
+    item = dict(item)
+    item["id"] = subtask_id
+    return repo_upsert_checklist_item(plan_id, task_id, item)
+
+
+def delete_subtask(plan_id: str, task_id: str, subtask_id: str) -> bool:
+    """Remove a checklist item. Returns True if removed."""
+    return repo_delete_checklist_item(plan_id, task_id, subtask_id)
+
+
 def get_tasks_for_plan(plan_id: str) -> list[dict[str, Any]]:
     """
     Return tasks for a plan: from DB if we have synced data, else simulated for DEFAULT_PLAN_ID only.
-    Uses relative dates for seed data so the attention dashboard (Due next 7 days, Critical path due next,
-    Recently changed) shows meaningful counts.
+    When using Postgres and default plan has no tasks, auto-seed congress simulated data into DB
+    so all reads/writes use Postgres with simulated data.
     """
     from_db = get_planner_tasks_from_db(plan_id)
     if from_db:
         return from_db
     if plan_id == DEFAULT_PLAN_ID:
+        if get_settings().is_postgres:
+            # Auto-seed simulated data into Postgres so we use DB + simulated content
+            seed_congress_plan(plan_id)
+            _seed_congress_dependencies(plan_id)
+            return get_planner_tasks_from_db(plan_id) or get_congress_seed_tasks(
+                plan_id, use_relative_dates_for_attention=True
+            )
         return get_congress_seed_tasks(plan_id, use_relative_dates_for_attention=True)
     return []
 
@@ -412,7 +543,7 @@ def get_tasks_for_plan(plan_id: str) -> list[dict[str, Any]]:
 def sync_planner_tasks(plan_id: str = DEFAULT_PLAN_ID) -> dict[str, Any]:
     """
     Sync tasks from MS Planner (or simulated when Graph not configured).
-    When Graph is configured and token is obtained, fetches from Graph API and persists to SQLite.
+    When Graph is configured and token is obtained, fetches from Graph API and persists to DB (Postgres or SQLite).
     """
     if is_graph_configured():
         token = get_token()

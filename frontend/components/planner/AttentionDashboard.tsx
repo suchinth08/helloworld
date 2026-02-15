@@ -27,13 +27,14 @@ import {
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip);
 
-const DEFAULT_PLAN_ID = "uc31-plan";
+import { DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 
 interface AttentionDashboardProps {
+  planId?: string;
   refreshTrigger?: number;
 }
 
-export default function AttentionDashboard({ refreshTrigger = 0 }: AttentionDashboardProps) {
+export default function AttentionDashboard({ planId = DEFAULT_PLAN_ID, refreshTrigger = 0 }: AttentionDashboardProps) {
   const [data, setData] = useState<AttentionDashboardResponse | null>(null);
   const [changes, setChanges] = useState<{ count: number; changes: { id: string; title: string; lastModifiedAt?: string; assigneeNames?: string[] }[] }>({ count: 0, changes: [] });
   const [planLink, setPlanLink] = useState<string>("");
@@ -61,7 +62,7 @@ export default function AttentionDashboard({ refreshTrigger = 0 }: AttentionDash
 
   useEffect(() => {
     load();
-  }, [refreshTrigger]);
+  }, [planId, refreshTrigger]);
 
   if (loading) {
     return (

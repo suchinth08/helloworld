@@ -4,6 +4,8 @@ Base URL: `http://localhost:8010` (or `NEXT_PUBLIC_CONGRESS_TWIN_API_URL` in fro
 
 All planner endpoints are under **`/api/v1/planner`**. Default plan ID for simulated data: `uc31-plan`.
 
+**Database:** Set `POSTGRES_HOST` (see `.env.example`) to use your existing PostgreSQL; the app will auto-seed simulated congress tasks and dependencies for the default plan when the DB is empty. Without `POSTGRES_HOST`, SQLite is used with the same simulated data.
+
 ---
 
 ## Health

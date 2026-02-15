@@ -104,6 +104,144 @@ export interface MilestoneAnalysisResponse {
   at_risk_count: number;
 }
 
+// Plan listing (Phase 1.2)
+export interface PlannerPlan {
+  plan_id: string;
+  name: string;
+  congress_date?: string | null;
+  source_plan_id?: string | null;
+  created_at?: string | null;
+}
+
+export async function fetchPlans(): Promise<{ plans: PlannerPlan[]; count: number }> {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans`);
+  if (!r.ok) throw new Error(`Plans: ${r.status}`);
+  return r.json();
+}
+
+export interface PlannerBucket {
+  id: string;
+  name: string;
+  order_hint?: string;
+}
+
+export async function fetchBuckets(planId: string): Promise<{ plan_id: string; buckets: PlannerBucket[] }> {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/buckets`);
+  if (!r.ok) throw new Error(`Buckets: ${r.status}`);
+  return r.json();
+}
+
+// Task CRUD (Phase 1.1)
+export async function createTask(planId: string, body: { title: string; bucketId: string; startDateTime?: string; dueDateTime?: string; assignees?: string[]; priority?: number; description?: string }) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `Create task: ${r.status}`);
+  }
+  return r.json() as Promise<{ plan_id: string; task: PlannerTask }>;
+}
+
+export async function updateTask(planId: string, taskId: string, body: Partial<{ title: string; bucketId: string; startDateTime: string; dueDateTime: string; assignees: string[]; assigneeNames: string[]; priority: number; description: string; status: string; percentComplete: number }>) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `Update task: ${r.status}`);
+  }
+  return r.json() as Promise<{ plan_id: string; task: PlannerTask }>;
+}
+
+export async function deleteTask(planId: string, taskId: string) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}`, {
+    method: "DELETE",
+  });
+  if (!r.ok) throw new Error(`Delete task: ${r.status}`);
+  return r.json();
+}
+
+export async function addSubtask(planId: string, taskId: string, body: { title: string; isChecked?: boolean; orderHint?: string }) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}/subtasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Add subtask: ${r.status}`);
+  return r.json() as Promise<{ plan_id: string; task_id: string; subtask: { id: string; title: string; isChecked: boolean; orderHint?: string } }>;
+}
+
+export async function updateSubtask(planId: string, taskId: string, subtaskId: string, body: Partial<{ title: string; isChecked: boolean; orderHint: string }>) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}/subtasks/${subtaskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Update subtask: ${r.status}`);
+  return r.json();
+}
+
+export async function publishPlan(planId: string) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/publish`, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(`Publish: ${r.status}`);
+  return r.json() as Promise<{ plan_id: string; published: boolean; tasks_pushed: number }>;
+}
+
+export interface ImpactAnalysisBody {
+  dueDateTime?: string;
+  startDateTime?: string;
+  assignees?: string[];
+  percentComplete?: number;
+  slippage_days?: number;
+}
+
+export interface ImpactAnalysisResult {
+  plan_id?: string;
+  task_id?: string;
+  affected_task_ids?: string[];
+  message?: string;
+  impact_statement?: string;
+}
+
+export async function analyzeImpact(
+  planId: string,
+  taskId: string,
+  body: ImpactAnalysisBody
+): Promise<ImpactAnalysisResult> {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}/impact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`Impact: ${r.status}`);
+  return r.json();
+}
+
+export async function sendChatMessage(planId: string, message: string) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/chat?plan_id=${planId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!r.ok) throw new Error(`Chat: ${r.status}`);
+  return r.json();
+}
+
+export async function deleteSubtask(planId: string, taskId: string, subtaskId: string) {
+  const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/plans/${planId}/tasks/${taskId}/subtasks/${subtaskId}`, {
+    method: "DELETE",
+  });
+  if (!r.ok) throw new Error(`Delete subtask: ${r.status}`);
+  return r.json();
+}
+
 export async function fetchPlannerTasks(planId: string = DEFAULT_PLAN_ID) {
   const r = await fetch(`${CONGRESS_TWIN_API}/api/v1/planner/tasks/${planId}`);
   if (!r.ok) throw new Error(`Planner tasks: ${r.status}`);

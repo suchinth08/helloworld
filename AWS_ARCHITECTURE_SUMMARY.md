@@ -1,4 +1,4 @@
-# Novartis Planner — AWS Architecture Summary (Visual)
+ # Novartis Planner — AWS Architecture Summary (Visual)
 
 ## 🎯 Simplified Component Flow
 

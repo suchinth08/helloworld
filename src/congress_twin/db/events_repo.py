@@ -1,5 +1,6 @@
 """
 External events and agent proposed actions (alerts, HITL approval).
+Uses PostgreSQL when configured, else SQLite.
 """
 
 import json
@@ -8,15 +9,18 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
 
 from congress_twin.config import get_settings
-from congress_twin.db.planner_repo import get_engine
+from congress_twin.db.planner_repo import _json_param, get_engine
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_tables(engine: Engine) -> None:
+def _ensure_tables() -> None:
+    """Create tables if not exist. No-op when using PostgreSQL (schema from init script)."""
+    if get_settings().is_postgres:
+        return
+    engine = get_engine()
     with engine.connect() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS external_events (
@@ -63,37 +67,58 @@ def insert_external_event(
     affected_task_ids: Optional[list[str]] = None,
     payload: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    _ensure_tables(get_engine())
-    with get_engine().connect() as conn:
-        # SQLite doesn't support RETURNING, so insert then fetch
-        conn.execute(
-            text("""
-                INSERT INTO external_events
-                (plan_id, event_type, title, description, severity, affected_task_ids, payload)
-                VALUES (:plan_id, :event_type, :title, :description, :severity, :affected_task_ids, :payload)
-            """),
-            {
-                "plan_id": plan_id,
-                "event_type": event_type,
-                "title": title,
-                "description": description or "",
-                "severity": severity,
-                "affected_task_ids": json.dumps(affected_task_ids or []),
-                "payload": json.dumps(payload or {}),
-            },
-        )
+    _ensure_tables()
+    engine = get_engine()
+    with engine.connect() as conn:
+        if get_settings().is_postgres:
+            r = conn.execute(
+                text("""
+                    INSERT INTO external_events
+                    (plan_id, event_type, title, description, severity, affected_task_ids, payload)
+                    VALUES (:plan_id, :event_type, :title, :description, :severity, :affected_task_ids, :payload)
+                    RETURNING id, plan_id, event_type, title, description, severity,
+                              affected_task_ids, payload, created_at, acknowledged_at
+                """),
+                {
+                    "plan_id": plan_id,
+                    "event_type": event_type,
+                    "title": title,
+                    "description": description or "",
+                    "severity": severity,
+                    "affected_task_ids": _json_param(affected_task_ids or []),
+                    "payload": _json_param(payload or {}),
+                },
+            )
+            row = r.fetchone()
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO external_events
+                    (plan_id, event_type, title, description, severity, affected_task_ids, payload)
+                    VALUES (:plan_id, :event_type, :title, :description, :severity, :affected_task_ids, :payload)
+                """),
+                {
+                    "plan_id": plan_id,
+                    "event_type": event_type,
+                    "title": title,
+                    "description": description or "",
+                    "severity": severity,
+                    "affected_task_ids": json.dumps(affected_task_ids or []),
+                    "payload": json.dumps(payload or {}),
+                },
+            )
+            conn.commit()
+            event_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+            r = conn.execute(
+                text("""
+                    SELECT id, plan_id, event_type, title, description, severity,
+                           affected_task_ids, payload, created_at, acknowledged_at
+                    FROM external_events WHERE id = :id
+                """),
+                {"id": event_id},
+            )
+            row = r.fetchone()
         conn.commit()
-        # Fetch the inserted row
-        event_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
-        r = conn.execute(
-            text("""
-                SELECT id, plan_id, event_type, title, description, severity,
-                       affected_task_ids, payload, created_at, acknowledged_at
-                FROM external_events WHERE id = :id
-            """),
-            {"id": event_id},
-        )
-        row = r.fetchone()
     return _event_row_to_dict(row)
 
 
@@ -127,7 +152,7 @@ def _event_row_to_dict(row: Any) -> dict[str, Any]:
 
 def get_external_events(plan_id: str, limit: int = 50) -> list[dict[str, Any]]:
     try:
-        _ensure_tables(get_engine())
+        _ensure_tables()
         with get_engine().connect() as conn:
             r = conn.execute(
                 text("""
@@ -155,37 +180,58 @@ def insert_proposed_action(
     external_event_id: Optional[int] = None,
     payload: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    _ensure_tables(get_engine())
-    with get_engine().connect() as conn:
-        # SQLite doesn't support RETURNING, so insert then fetch
-        conn.execute(
-            text("""
-                INSERT INTO agent_proposed_actions
-                (plan_id, external_event_id, task_id, action_type, title, description, payload)
-                VALUES (:plan_id, :external_event_id, :task_id, :action_type, :title, :description, :payload)
-            """),
-            {
-                "plan_id": plan_id,
-                "external_event_id": external_event_id,
-                "task_id": task_id,
-                "action_type": action_type,
-                "title": title,
-                "description": description or "",
-                "payload": json.dumps(payload or {}),
-            },
-        )
+    _ensure_tables()
+    engine = get_engine()
+    with engine.connect() as conn:
+        if get_settings().is_postgres:
+            r = conn.execute(
+                text("""
+                    INSERT INTO agent_proposed_actions
+                    (plan_id, external_event_id, task_id, action_type, title, description, payload)
+                    VALUES (:plan_id, :external_event_id, :task_id, :action_type, :title, :description, :payload)
+                    RETURNING id, plan_id, external_event_id, task_id, action_type, title, description,
+                              payload, status, created_at, decided_at, decided_by
+                """),
+                {
+                    "plan_id": plan_id,
+                    "external_event_id": external_event_id,
+                    "task_id": task_id,
+                    "action_type": action_type,
+                    "title": title,
+                    "description": description or "",
+                    "payload": _json_param(payload or {}),
+                },
+            )
+            row = r.fetchone()
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO agent_proposed_actions
+                    (plan_id, external_event_id, task_id, action_type, title, description, payload)
+                    VALUES (:plan_id, :external_event_id, :task_id, :action_type, :title, :description, :payload)
+                """),
+                {
+                    "plan_id": plan_id,
+                    "external_event_id": external_event_id,
+                    "task_id": task_id,
+                    "action_type": action_type,
+                    "title": title,
+                    "description": description or "",
+                    "payload": json.dumps(payload or {}),
+                },
+            )
+            conn.commit()
+            action_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+            r = conn.execute(
+                text("""
+                    SELECT id, plan_id, external_event_id, task_id, action_type, title, description,
+                           payload, status, created_at, decided_at, decided_by
+                    FROM agent_proposed_actions WHERE id = :id
+                """),
+                {"id": action_id},
+            )
+            row = r.fetchone()
         conn.commit()
-        # Fetch the inserted row
-        action_id = conn.execute(text("SELECT last_insert_rowid()")).scalar()
-        r = conn.execute(
-            text("""
-                SELECT id, plan_id, external_event_id, task_id, action_type, title, description,
-                       payload, status, created_at, decided_at, decided_by
-                FROM agent_proposed_actions WHERE id = :id
-            """),
-            {"id": action_id},
-        )
-        row = r.fetchone()
     return _action_row_to_dict(row)
 
 
@@ -220,7 +266,7 @@ def _action_row_to_dict(row: Any) -> dict[str, Any]:
 
 def get_proposed_actions(plan_id: str, status: Optional[str] = None, limit: int = 100) -> list[dict[str, Any]]:
     try:
-        _ensure_tables(get_engine())
+        _ensure_tables()
         with get_engine().connect() as conn:
             if status:
                 r = conn.execute(

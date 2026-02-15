@@ -1,16 +1,29 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, Calendar, User, Tag, CheckSquare, Link as LinkIcon, GitBranch, FileText, Clock, AlertTriangle, TrendingUp, Users, Target, Zap, BarChart3 } from "lucide-react";
-import { fetchTaskDetails, fetchTaskIntelligence, type PlannerTask, type TaskIntelligence } from "@/lib/congressTwinApi";
+import { X, Calendar, User, Tag, CheckSquare, Link as LinkIcon, GitBranch, FileText, Clock, AlertTriangle, TrendingUp, Users, Target, Zap, BarChart3, Pencil, Trash2, Plus } from "lucide-react";
+import {
+  fetchTaskDetails,
+  fetchTaskIntelligence,
+  fetchTaskDependencies,
+  updateTask,
+  deleteTask,
+  addSubtask,
+  updateSubtask,
+  deleteSubtask,
+  analyzeImpact,
+  type PlannerTask,
+  type TaskIntelligence,
+  type ImpactAnalysisResult,
+} from "@/lib/congressTwinApi";
 import { Loader2 } from "lucide-react";
-
-const DEFAULT_PLAN_ID = "uc31-plan";
+import { DEFAULT_PLAN_ID } from "@/lib/congressTwinApi";
 
 interface TaskDetailPanelProps {
   taskId: string | null;
   planId?: string;
   onClose: () => void;
+  onSaved?: () => void;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -47,32 +60,72 @@ function formatPriority(priority: number | undefined) {
   return "High";
 }
 
+/** Convert ISO date string to local datetime string for input[type="datetime-local"] (YYYY-MM-DDTHH:mm). */
+function toLocalDatetime(iso: string | undefined): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const h = String(d.getHours()).padStart(2, "0");
+    const min = String(d.getMinutes()).padStart(2, "0");
+    return `${y}-${m}-${day}T${h}:${min}`;
+  } catch {
+    return "";
+  }
+}
+
 export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onClose }: TaskDetailPanelProps) {
   const [task, setTask] = useState<PlannerTask | null>(null);
   const [intelligence, setIntelligence] = useState<TaskIntelligence | null>(null);
   const [loading, setLoading] = useState(false);
   const [intelligenceLoading, setIntelligenceLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editMode, setEditMode] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editStatus, setEditStatus] = useState<string>("notStarted");
+  const [editDueDateTime, setEditDueDateTime] = useState("");
+  const [editStartDateTime, setEditStartDateTime] = useState("");
+  const [newSubtaskTitle, setNewSubtaskTitle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [impactResult, setImpactResult] = useState<ImpactAnalysisResult | null>(null);
+  const [impactLoading, setImpactLoading] = useState(false);
+  const [dependencies, setDependencies] = useState<{ upstream: { id: string; title: string }[]; downstream: { id: string; title: string }[]; impact_statement: string } | null>(null);
 
   useEffect(() => {
     if (!taskId) {
       setTask(null);
       setIntelligence(null);
+      setEditMode(false);
+      setNewSubtaskTitle("");
       return;
     }
 
     setLoading(true);
     setIntelligenceLoading(true);
     setError(null);
-    
+    setEditMode(false);
+    setNewSubtaskTitle("");
+
     // Fetch task details and intelligence in parallel
     Promise.all([
       fetchTaskDetails(planId, taskId),
-      fetchTaskIntelligence(planId, taskId, true).catch(() => null), // Don't fail if intelligence fails
+      fetchTaskIntelligence(planId, taskId, true).catch(() => null),
+      fetchTaskDependencies(planId, taskId).catch(() => null),
     ])
-      .then(([taskRes, intelligenceRes]) => {
-        setTask(taskRes.task);
+      .then(([taskRes, intelligenceRes, depsRes]) => {
+        const t = taskRes.task;
+        setTask(t);
         setIntelligence(intelligenceRes);
+        setDependencies(depsRes ? { upstream: depsRes.upstream, downstream: depsRes.downstream, impact_statement: depsRes.impact_statement } : null);
+        setImpactResult(null);
+        setEditTitle(t.title || "");
+        setEditDescription(t.description ?? "");
+        setEditStatus(t.status || "notStarted");
+        setEditDueDateTime(toLocalDatetime(t.dueDateTime));
+        setEditStartDateTime(toLocalDatetime(t.startDateTime));
       })
       .catch((e) => {
         setError(e instanceof Error ? e.message : "Failed to load task details");
@@ -98,14 +151,26 @@ export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onCl
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-[#e5e7eb]">
           <h2 className="text-lg font-bold text-[#111827]">Task Details</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1.5 text-[#6b7280] hover:bg-[#f3f4f6]"
-            aria-label="Close"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            {!editMode ? (
+              <button
+                type="button"
+                onClick={() => setEditMode(true)}
+                className="rounded p-2 text-[#6b7280] hover:bg-[#f3f4f6]"
+                title="Edit"
+              >
+                <Pencil className="h-4 w-4" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded p-1.5 text-[#6b7280] hover:bg-[#f3f4f6]"
+              aria-label="Close"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
         {/* Content */}
@@ -126,25 +191,182 @@ export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onCl
             <div className="space-y-6">
               {/* Title and Status */}
               <div>
-                <h1 className="text-2xl font-bold text-[#111827] mb-3">{task.title}</h1>
+                {editMode ? (
+                  <input
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="w-full text-xl font-bold text-[#111827] mb-3 rounded border border-[#d1d5db] px-3 py-2"
+                  />
+                ) : (
+                  <h1 className="text-2xl font-bold text-[#111827] mb-3">{task.title}</h1>
+                )}
                 <div className="flex items-center gap-3 flex-wrap">
-                  <span className={`inline-flex rounded px-2.5 py-1 text-xs font-medium ${STATUS_COLOR[task.status ?? ""] ?? STATUS_COLOR.notStarted}`}>
-                    {STATUS_LABEL[task.status ?? ""] ?? task.status ?? "—"}
-                  </span>
-                  {task.priority !== undefined && (
+                  {editMode ? (
+                    <select
+                      value={editStatus}
+                      onChange={(e) => setEditStatus(e.target.value)}
+                      className="rounded border border-[#d1d5db] px-2 py-1 text-sm"
+                    >
+                      {(["notStarted", "inProgress", "completed"] as const).map((s) => (
+                        <option key={s} value={s}>{STATUS_LABEL[s]}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className={`inline-flex rounded px-2.5 py-1 text-xs font-medium ${STATUS_COLOR[task.status ?? ""] ?? STATUS_COLOR.notStarted}`}>
+                      {STATUS_LABEL[task.status ?? ""] ?? task.status ?? "—"}
+                    </span>
+                  )}
+                  {!editMode && task.priority !== undefined && (
                     <span className="inline-flex items-center gap-1.5 text-sm text-[#6b7280]">
                       <Tag className="h-4 w-4" />
                       {formatPriority(task.priority)}
                     </span>
                   )}
-                  <span className="text-sm text-[#6b7280]">
-                    {task.percentComplete ?? 0}% complete
-                  </span>
+                  {!editMode && (
+                    <span className="text-sm text-[#6b7280]">
+                      {task.percentComplete ?? 0}% complete
+                    </span>
+                  )}
                 </div>
+                {editMode && (
+                  <div className="flex gap-2 mt-3 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setSaving(true);
+                        setError(null);
+                        try {
+                          const toIso = (s: string) => (s ? (s.endsWith("Z") || s.includes("+") ? s : `${s}Z`) : undefined);
+                          const res = await updateTask(planId, taskId, {
+                            title: editTitle.trim(),
+                            status: editStatus,
+                            description: editDescription || undefined,
+                            dueDateTime: toIso(editDueDateTime),
+                            startDateTime: toIso(editStartDateTime),
+                          });
+                          setTask(res.task);
+                          setEditMode(false);
+                          onSaved?.();
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Failed to save");
+                        } finally {
+                          setSaving(false);
+                        }
+                      }}
+                      disabled={saving}
+                      className="inline-flex items-center gap-2 rounded-lg bg-[#16a34a] px-3 py-2 text-sm font-medium text-white hover:bg-[#15803d] disabled:opacity-60"
+                    >
+                      {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditMode(false);
+                        setEditTitle(task.title || "");
+                        setEditDescription(task.description || "");
+                        setEditStatus(task.status || "notStarted");
+                        setEditDueDateTime(toLocalDatetime(task.dueDateTime));
+                        setEditStartDateTime(toLocalDatetime(task.startDateTime));
+                      }}
+                      className="rounded-lg border border-[#d1d5db] px-3 py-2 text-sm font-medium text-[#374151] hover:bg-[#f3f4f6]"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!confirm("Delete this task?")) return;
+                        try {
+                          await deleteTask(planId, taskId);
+                          onSaved?.();
+                          onClose();
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Failed to delete");
+                        }
+                      }}
+                      className="rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-600 hover:bg-red-50 ml-auto"
+                    >
+                      <Trash2 className="h-4 w-4 inline mr-1" />
+                      Delete
+                    </button>
+                  </div>
+                )}
+                {editMode && (dependencies?.upstream?.length || dependencies?.downstream?.length || dependencies?.impact_statement) && (
+                  <div className="mt-4 p-3 rounded-lg bg-[#f0fdf4] border border-[#bbf7d0] text-sm">
+                    <h4 className="font-medium text-[#166534] mb-2 flex items-center gap-2">
+                      <GitBranch className="h-4 w-4" />
+                      Dependencies & impact
+                    </h4>
+                    {dependencies.impact_statement && (
+                      <p className="text-[#15803d] mb-2">{dependencies.impact_statement}</p>
+                    )}
+                    {dependencies.upstream?.length > 0 && (
+                      <p className="text-[#6b7280]">Upstream: {dependencies.upstream.map((u) => u.title).join(", ")}</p>
+                    )}
+                    {dependencies.downstream?.length > 0 && (
+                      <p className="text-[#6b7280]">Downstream: {dependencies.downstream.map((d) => d.title).join(", ")}</p>
+                    )}
+                  </div>
+                )}
+                {editMode && (
+                  <div className="mt-4 p-3 rounded-lg bg-[#eff6ff] border border-[#bfdbfe] text-sm">
+                    <h4 className="font-medium text-[#1e40af] mb-2 flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4" />
+                      Impact of this change
+                    </h4>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setImpactLoading(true);
+                        setImpactResult(null);
+                        try {
+                          const toIso = (s: string) => (s ? (s.endsWith("Z") || s.includes("+") ? s : `${s}Z`) : undefined);
+                          const res = await analyzeImpact(planId, taskId, {
+                            dueDateTime: toIso(editDueDateTime),
+                            startDateTime: toIso(editStartDateTime),
+                          });
+                          setImpactResult(res);
+                        } catch (e) {
+                          setImpactResult({ message: e instanceof Error ? e.message : "Impact check failed" });
+                        } finally {
+                          setImpactLoading(false);
+                        }
+                      }}
+                      disabled={impactLoading}
+                      className="inline-flex items-center gap-2 rounded-lg border border-[#3b82f6] px-3 py-1.5 text-sm font-medium text-[#1e40af] hover:bg-[#dbeafe] disabled:opacity-60"
+                    >
+                      {impactLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      Check impact
+                    </button>
+                    {impactResult && (
+                      <div className="mt-2 p-2 rounded bg-white/80 text-[#374151]">
+                        {impactResult.message && <p>{impactResult.message}</p>}
+                        {impactResult.affected_task_ids && impactResult.affected_task_ids.length > 0 && (
+                          <p className="mt-1">Affected tasks: {impactResult.affected_task_ids.join(", ")}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Description */}
-              {task.description && (
+              {editMode ? (
+                <div>
+                  <h3 className="text-sm font-semibold text-[#111827] mb-2 flex items-center gap-2">
+                    <FileText className="h-4 w-4" />
+                    Description
+                  </h3>
+                  <textarea
+                    value={editDescription}
+                    onChange={(e) => setEditDescription(e.target.value)}
+                    rows={4}
+                    className="w-full rounded border border-[#d1d5db] px-3 py-2 text-sm resize-none"
+                  />
+                </div>
+              ) : task.description ? (
                 <div>
                   <h3 className="text-sm font-semibold text-[#111827] mb-2 flex items-center gap-2">
                     <FileText className="h-4 w-4" />
@@ -152,10 +374,33 @@ export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onCl
                   </h3>
                   <p className="text-sm text-[#374151] whitespace-pre-wrap">{task.description}</p>
                 </div>
-              )}
+              ) : null}
 
               {/* Dates */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {editMode ? (
+                  <>
+                    <div>
+                      <label className="text-xs font-semibold text-[#6b7280] uppercase tracking-wide mb-1 block">Start Date</label>
+                      <input
+                        type="datetime-local"
+                        value={editStartDateTime}
+                        onChange={(e) => setEditStartDateTime(e.target.value)}
+                        className="w-full rounded border border-[#d1d5db] px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-[#6b7280] uppercase tracking-wide mb-1 block">Due Date</label>
+                      <input
+                        type="datetime-local"
+                        value={editDueDateTime}
+                        onChange={(e) => setEditDueDateTime(e.target.value)}
+                        className="w-full rounded border border-[#d1d5db] px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
                 {task.startDateTime && (
                   <div>
                     <h3 className="text-xs font-semibold text-[#6b7280] uppercase tracking-wide mb-1 flex items-center gap-1.5">
@@ -173,6 +418,8 @@ export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onCl
                     </h3>
                     <p className="text-sm text-[#111827]">{formatDate(task.dueDateTime)}</p>
                   </div>
+                )}
+                  </>
                 )}
                 {task.completedDateTime && (
                   <div>
@@ -246,29 +493,96 @@ export default function TaskDetailPanel({ taskId, planId = DEFAULT_PLAN_ID, onCl
               )}
 
               {/* Checklist */}
-              {task.checklist && task.checklist.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold text-[#111827] mb-2 flex items-center gap-2">
-                    <CheckSquare className="h-4 w-4" />
-                    Checklist
-                  </h3>
+              <div>
+                <h3 className="text-sm font-semibold text-[#111827] mb-2 flex items-center gap-2">
+                  <CheckSquare className="h-4 w-4" />
+                  Checklist
+                </h3>
+                {task.checklist && task.checklist.length > 0 ? (
                   <ul className="space-y-2">
                     {task.checklist.map((item) => (
-                      <li key={item.id} className="flex items-start gap-2">
+                      <li key={item.id} className="flex items-start gap-2 group">
                         <input
                           type="checkbox"
                           checked={item.isChecked}
-                          readOnly
-                          className="mt-0.5 h-4 w-4 rounded border-[#d1d5db] text-blue-600 focus:ring-blue-500"
+                          onChange={async () => {
+                            try {
+                              await updateSubtask(planId, taskId, item.id, { isChecked: !item.isChecked });
+                              setTask((t) => t ? {
+                                ...t,
+                                checklist: (t.checklist || []).map((c) =>
+                                  c.id === item.id ? { ...c, isChecked: !c.isChecked } : c
+                                ),
+                              } : null);
+                              onSaved?.();
+                            } catch {}
+                          }}
+                          className="mt-0.5 h-4 w-4 rounded border-[#d1d5db] text-blue-600 focus:ring-blue-500 cursor-pointer"
                         />
-                        <span className={`text-sm ${item.isChecked ? "text-[#6b7280] line-through" : "text-[#374151]"}`}>
+                        <span className={`flex-1 text-sm ${item.isChecked ? "text-[#6b7280] line-through" : "text-[#374151]"}`}>
                           {item.title}
                         </span>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              await deleteSubtask(planId, taskId, item.id);
+                              setTask((t) => t ? { ...t, checklist: (t.checklist || []).filter((c) => c.id !== item.id) } : null);
+                              onSaved?.();
+                            } catch {}
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 text-red-500 hover:bg-red-50 rounded"
+                          title="Delete subtask"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </li>
                     ))}
                   </ul>
+                ) : (
+                  <p className="text-sm text-[#6b7280]">No subtasks</p>
+                )}
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="text"
+                    value={newSubtaskTitle}
+                    onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                    placeholder="Add subtask..."
+                    className="flex-1 rounded border border-[#d1d5db] px-3 py-1.5 text-sm"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (newSubtaskTitle.trim()) {
+                          addSubtask(planId, taskId, { title: newSubtaskTitle.trim() })
+                            .then((r) => {
+                              setTask((t) => t ? { ...t, checklist: [...(t.checklist || []), r.subtask] } : null);
+                              setNewSubtaskTitle("");
+                              onSaved?.();
+                            })
+                            .catch(() => {});
+                        }
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (newSubtaskTitle.trim()) {
+                        addSubtask(planId, taskId, { title: newSubtaskTitle.trim() })
+                          .then((r) => {
+                            setTask((t) => t ? { ...t, checklist: [...(t.checklist || []), r.subtask] } : null);
+                            setNewSubtaskTitle("");
+                            onSaved?.();
+                          })
+                          .catch(() => {});
+                      }
+                    }}
+                    className="rounded px-2 py-1.5 text-sm font-medium text-[#16a34a] hover:bg-[#dcfce7]"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
                 </div>
-              )}
+              </div>
 
               {/* Dependencies - Show basic list, detailed analysis in Intelligence section */}
               {task.dependencies && task.dependencies.length > 0 && (
